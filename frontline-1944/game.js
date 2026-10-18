@@ -7,7 +7,7 @@
 //            5 game rules · 6 drawing · 7 controls
 // ============================================================
 
-const BUILD = 25;             // shown on screen, so you can tell the browser loaded the newest version
+const BUILD = 28;             // shown on screen, so you can tell the browser loaded the newest version
 document.querySelector(".tag").textContent += " · build " + BUILD;
 
 // ---------- 1) SETTINGS: change these to tweak the game ----------
@@ -110,13 +110,53 @@ function stairsY(x, z) {
   return HOUSE.floor * clamp01((STAIRS.x1 - x) / (STAIRS.x1 - STAIRS.x0));
 }
 function supportY(x, z, y) {         // the highest floor below someone at height y that they can step onto
-  let best = groundY(x, z);
-  const reach = y + .55;
+  const reach = y + .55, ground = groundY(x, z);
+  let best = ground <= reach ? ground : -99;
   const s = stairsY(x, z);
-  if (s > best && s <= reach) best = s;
+  if (s >= 0 && s > best && s <= reach) best = s;       // (s is -1 when not on the stairs)
   if (inRect(x, z, HOUSE) && !inRect(x, z, STAIRWELL) && !inRect(x, z, HOLE) && HOUSE.floor <= reach) best = Math.max(best, HOUSE.floor);
+  return best > -99 ? best : ground;
+}
+// ---------- trenches: zig-zag lines dug into the ground, lined with planks and topped with sandbags ----------
+const TRENCH = { depth: 1, half: .85, parapet: .45, ramp: 3 };   // depth, half the width, sandbag height, length of the slope at an open end
+const trenchLines = [
+  { pts: [[-23, -13], [-20, -9], [-23.5, -5], [-20, -1], [-23.5, 3], [-20, 7], [-23, 11.5]], rampStart: true, rampEnd: true },   // the fire trench
+  { pts: [[-20.2, -1], [-16.5, -.5], [-13.5, -1.8]], rampStart: false, rampEnd: true },                                        // a side trench towards the start
+];
+for (const t of trenchLines) {
+  t.len = 0;
+  t.segs = t.pts.slice(1).map((b, i) => {
+    const a = t.pts[i], L = Math.hypot(b[0] - a[0], b[1] - a[1]), s = { a, b, L, s0: t.len };
+    t.len += L;
+    return s;
+  });
+}
+function lineInfo(t, x, z) {         // how far a spot is from one trench's middle line, and how deep that trench is there
+  let best = { d: 1e9, depth: 0 };
+  for (const s of t.segs) {
+    const dx = s.b[0] - s.a[0], dz = s.b[1] - s.a[1];
+    const k = Math.max(0, Math.min(1, ((x - s.a[0]) * dx + (z - s.a[1]) * dz) / (s.L * s.L)));
+    const d = Math.hypot(x - s.a[0] - dx * k, z - s.a[1] - dz * k);
+    if (d < best.d) {
+      const along = s.s0 + k * s.L;
+      let depth = TRENCH.depth;
+      if (t.rampStart) depth *= Math.min(1, along / TRENCH.ramp);
+      if (t.rampEnd) depth *= Math.min(1, (t.len - along) / TRENCH.ramp);
+      best = { d, depth };
+    }
+  }
   return best;
 }
+function trenchAt(x, z) {            // the nearest trench to a spot
+  let best = { d: 1e9, depth: 0 };
+  for (const t of trenchLines) { const i = lineInfo(t, x, z); if (i.d < best.d) best = i; }
+  return best;
+}
+function parapetTop(x, z) {          // the sandbags along a trench's edges stop bullets that fly lower than them
+  const t = trenchAt(x, z);
+  return t.d > TRENCH.half && t.d < TRENCH.half + 1.15 && t.depth > .4 ? groundY(x, z) + TRENCH.parapet : -99;   // a little wider than the bags, so fast bullets cannot skip past
+}
+
 // ---------- helpers for the flat map ----------
 const rand = (a, b) => a + Math.random() * (b - a);
 const dist = (a, b) => Math.hypot(a.x - b.x, a.z - b.z);
@@ -130,22 +170,28 @@ function blocked(x, z, r, y = 0) {  // y = how high the soldier's feet are: wall
   if (x < MINX + r || x > MAXX - r || z < MINZ + r || z > MAXZ - r) return true;
   return walls.some(w => y < w.top - .25 && y > (w.base || 0) - .6 && circleHitsRect(x, z, r, w));
 }
+const tooSteep = (o, x, z) => groundY(x, z) > (o.y ?? 0) + .6;   // a trench wall or other drop too high to step up
 function move(o, dx, dz) {           // slide along walls instead of sticking
-  if (!blocked(o.x + dx, o.z, o.r, o.y || 0)) o.x += dx; else o.vx = 0;
-  if (!blocked(o.x, o.z + dz, o.r, o.y || 0)) o.z += dz; else o.vz = 0;
+  const y = o.y || 0, rx = Math.sign(dx) * o.r * .7, rz = Math.sign(dz) * o.r * .7;
+  // a wall stops you dead; a trench side just holds you back, so a jump can still carry you up and over it
+  if (blocked(o.x + dx, o.z, o.r, y)) o.vx = 0; else if (!tooSteep(o, o.x + dx + rx, o.z)) o.x += dx;
+  if (blocked(o.x, o.z + dz, o.r, y)) o.vz = 0; else if (!tooSteep(o, o.x, o.z + dz + rz)) o.z += dz;
 }
 // does a wall stop a shot here? lift = the height of whoever is higher up, the shooter or the target:
 // from up high you fire over low walls, and anyone can fire over a windowsill
-const wallStopsShot = (x, z, lift) => walls.some(w => x > w.x && x < w.x + w.w && z > w.z && z < w.z + w.d && w.top > lift + 1 && (w.base || 0) < lift + 1.6);
+// does something stop a shot flying through (x, z) at height h? walls, windowsills and sandbags only stop it if it is lower than their top
+const wallStopsShot = (x, z, h) => walls.some(w => x > w.x && x < w.x + w.w && z > w.z && z < w.z + w.d && w.top > h && (w.base || 0) < h) || h < parapetTop(x, z);
 function steer(o, tx, tz, agility) { // ease towards the wanted speed, so soldiers have a bit of weight
   o.vx += (tx - o.vx) * agility;
   o.vz += (tz - o.vz) * agility;
   move(o, o.vx, o.vz);
 }
-function clearShot(a, b) {           // can a bullet get from a to b?
-  const steps = Math.ceil(dist(a, b) / 0.8), lift = Math.max(a.y || 0, b.y || 0);
+// can a bullet get from a to b? ha, hb: the heights it leaves from and arrives at (rifle, and the target's body)
+function clearShot(a, b, ha = (a.y || 0) + 1.5, hb = (b.y || 0) + (b.crouched ? .85 : 1.25)) {
+  const steps = Math.ceil(dist(a, b) / 0.8);
   for (let i = 1; i < steps; i++) {
-    if (wallStopsShot(a.x + (b.x - a.x) * i / steps, a.z + (b.z - a.z) * i / steps, lift)) return false;
+    const k = i / steps, x = a.x + (b.x - a.x) * k, z = a.z + (b.z - a.z) * k, h = ha + (hb - ha) * k;
+    if (wallStopsShot(x, z, h) || h < groundY(x, z)) return false;
   }
   return true;
 }
@@ -198,12 +244,12 @@ const track = (x, z) => clamp01(1 - Math.abs(z - 9 * Math.sin(x * .05) - 3) / 1.
 const craters = [];
 for (let tries = 0; craters.length < 24 && tries < 600; tries++) {
   const c = { x: rand(-64, 64), z: rand(-46, 46), r: rand(1.3, 3.6) };
-  if (wallGap(c.x, c.z) < c.r + 1.5 || Math.hypot(Math.abs(c.x) - 10, c.z) < c.r + 2.5) continue;
+  if (wallGap(c.x, c.z) < c.r + 1.5 || Math.hypot(Math.abs(c.x) - 10, c.z) < c.r + 2.5 || trenchAt(c.x, c.z).d < c.r + 2.5) continue;
   if (craters.some(o => Math.hypot(o.x - c.x, o.z - c.z) < o.r + c.r + .5)) continue;
   craters.push(c);
 }
 // how high the ground is at a spot: gentle rolls (flat by the walls) plus crater dips with raised rims
-function groundY(x, z) {
+function groundY(x, z, visual = false) {
   const edge = clamp01((100 - Math.abs(x)) / 12) * clamp01((75 - Math.abs(z)) / 12);
   const nearHouse = Math.hypot(Math.max(HOUSE.x0 - .5 - x, 0, x - HOUSE.x1 - .5), Math.max(HOUSE.z0 - .5 - z, 0, z - HOUSE.z1 - .5));
   let y = (fbm(x * .07, z * .07) - .5) * .55 * Math.min(1, wallGap(x, z) / 3) * edge * clamp01(nearHouse / 1.5);   // level where the house stands
@@ -211,6 +257,9 @@ function groundY(x, z) {
     const d = Math.hypot(x - c.x, z - c.z) / c.r;
     if (d < 1.7) y += c.r * .14 * (-Math.max(0, 1 - d * d) + .35 * Math.exp(-(((d - 1) * 3.5) ** 2)));
   }
+  const tr = trenchAt(x, z);
+  if (visual) { if (tr.d < TRENCH.half + .6) y -= tr.depth * clamp01((TRENCH.half + .6 - tr.d) / .35); }   // hidden under the sandbags
+  else if (tr.d < TRENCH.half) y -= tr.depth;
   return y;
 }
 
@@ -234,18 +283,20 @@ function groundY(x, z) {
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping; tex.repeat.set(60, 45);
   tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
 
-  const geo = new THREE.PlaneGeometry(200, 150, 250, 188); geo.rotateX(-Math.PI / 2);
+  const geo = new THREE.PlaneGeometry(200, 150, 500, 375); geo.rotateX(-Math.PI / 2);   // fine enough to show the trenches
   const pos = geo.attributes.position, cols = [];
   const grass = new THREE.Color(0x667a38), dry = new THREE.Color(0x9a9152), dirt = new THREE.Color(0x7d6747);
   const mud = new THREE.Color(0x54432d), scorch = new THREE.Color(0x2f281d), col = new THREE.Color();
   for (let i = 0; i < pos.count; i++) {
     const x = pos.getX(i), z = pos.getZ(i);
-    pos.setY(i, groundY(x, z));
+    pos.setY(i, groundY(x, z, true));
     col.copy(grass).lerp(dry, dryness(x, z) * .85);
     const inField = Math.abs(x) < MAXX + 2 && Math.abs(z) < MAXZ + 2;
     let wear = Math.max(inField ? (1 - wallGap(x, z) / 2.8) * .85 : 0, Math.abs(x) < 90 ? track(x, z) * .9 : 0);
     wear += (noise2(x * .6, z * .6) - .5) * .45;      // ragged edges
     col.lerp(dirt, clamp01(wear));
+    const tz = trenchAt(x, z);                         // dug earth round the trenches, mud in them
+    if (tz.depth > .05 && tz.d < TRENCH.half + 1.9) col.lerp(tz.d < TRENCH.half + .2 ? mud : dirt, clamp01((TRENCH.half + 1.9 - tz.d) / .8) * .85 * clamp01(tz.depth * 3));
     for (const cr of craters) {                       // churned mud with a scorched middle
       const d = Math.hypot(x - cr.x, z - cr.z) / cr.r;
       if (d < 1.5) { col.lerp(mud, clamp01(1.35 - d) * .9); if (d < .6) col.lerp(scorch, (.6 - d) * 1.3); }
@@ -258,7 +309,10 @@ function groundY(x, z) {
   const ground = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ map: tex, vertexColors: true }));
   ground.receiveShadow = true;
   scene.add(ground);
-  const outer = new THREE.Mesh(new THREE.PlaneGeometry(600, 600), new THREE.MeshLambertMaterial({ color: 0x5e6838 }));
+  // far-off ground beyond the edge of the field, with a hole in the middle so it never covers the trenches
+  const far = new THREE.Shape([[-300, -300], [300, -300], [300, 300], [-300, 300]].map(([x, y]) => new THREE.Vector2(x, y)));
+  far.holes.push(new THREE.Path([[-99, -74], [-99, 74], [99, 74], [99, -74]].map(([x, y]) => new THREE.Vector2(x, y))));
+  const outer = new THREE.Mesh(new THREE.ShapeGeometry(far), new THREE.MeshLambertMaterial({ color: 0x5e6838 }));
   outer.rotation.x = -Math.PI / 2; outer.position.y = -0.03;
   scene.add(outer);
 })();
@@ -424,7 +478,7 @@ const outsideFence = (x, z, gap) => Math.abs(x) > MAXX + gap || Math.abs(z) > MA
   for (const c of craters) for (let i = 0; i < 5; i++) { const a = rand(0, 6.3), d = c.r * rand(.9, 1.3); spots.push([c.x + Math.cos(a) * d, c.z + Math.sin(a) * d, .12]); }
   for (let i = 0; i < 60; i++) spots.push([rand(-90, 90), rand(-66, 66), .22]);
   for (const [x, z, s0] of spots) {
-    if (insideWall(x, z) || inRect(x, z, HOUSE, .3)) continue;
+    if (insideWall(x, z) || inRect(x, z, HOUSE, .3) || trenchAt(x, z).d < TRENCH.half + 1.4) continue;
     const s = s0 * rand(.6, 1.6);
     parts.push({ geo: lumpy(new THREE.DodecahedronGeometry(1, 0), .5), at: [x, groundY(x, z) + s * .25, z],
       scale: [s * rand(1, 1.6), s * rand(.6, 1), s * rand(1, 1.4)], rot: [rand(0, 3), rand(0, 6), rand(0, 3)], color: pick(stone) });
@@ -434,6 +488,59 @@ const outsideFence = (x, z, gap) => Math.abs(x) > MAXX + gap || Math.abs(z) > MA
 
 // The bombed-out house: plaster walls with patches of bare brick, scorched round the damage,
 // a staircase, floorboards upstairs, a collapsed corner with hanging slabs and charred beams, and heaps of rubble
+// The trenches: plank walls held by posts, duckboards along the floor, sandbags piled along both edges
+(function makeTrenches() {
+  const P = [], { half } = TRENCH;
+  const add = (w, h, d, at, yaw, color, tilt = 0) => P.push({ geo: new THREE.BoxGeometry(w, h, d), at, rot: [tilt, yaw, 0], color });
+  const planks = [0x6e5c45, 0x5f4f3b, 0x67563f], bags = [0xb9a676, 0xa8956a, 0x9c8a60];
+  for (const t of trenchLines) {
+    t.segs.forEach((s, si) => {
+      const dx = (s.b[0] - s.a[0]) / s.L, dz = (s.b[1] - s.a[1]) / s.L, nx = -dz, nz = dx, yaw = Math.atan2(dx, dz);
+      const startExt = si > 0 ? .9 : 0, endExt = si < t.segs.length - 1 ? .9 : 0;   // walls run on past the bends so the corners close up
+      const depthAt = u => {
+        const along = s.s0 + Math.max(0, Math.min(s.L, u));
+        let d = TRENCH.depth;
+        if (t.rampStart) d *= Math.min(1, along / TRENCH.ramp);
+        if (t.rampEnd) d *= Math.min(1, (t.len - along) / TRENCH.ramp);
+        return d;
+      };
+      const inOther = (x, z) => trenchLines.some(o => o !== t && lineInfo(o, x, z).d < half - .05);   // where two trenches join, leave the wall open
+      // plank walls in panels between posts, on both sides
+      for (let u = -startExt; u < s.L + endExt - .05; u += 1.2) {
+        const len = Math.min(1.2, s.L + endExt - u), mid = u + len / 2, dep = depthAt(mid);
+        if (dep < .12) continue;
+        for (const side of [-1, 1]) {
+          const x = s.a[0] + dx * mid + nx * side * (half + .03), z = s.a[1] + dz * mid + nz * side * (half + .03);
+          if (inOther(x, z)) continue;
+          const top = groundY(x + nx * side * .3, z + nz * side * .3);      // the ground just outside the trench
+          add(.06, dep + .1, len + .02, [x, top - dep / 2 + .05, z], yaw, planks[(Math.round(u) + side + 3) % 3]);
+          const px = s.a[0] + dx * u + nx * side * (half - .02), pz = s.a[1] + dz * u + nz * side * (half - .02);
+          if (!inOther(px, pz)) add(.1, dep + .25, .1, [px, top - dep / 2 + .12, pz], yaw, 0x3f3225);   // post
+        }
+      }
+      // duckboards: slats across two rails, so nobody stands in the mud
+      for (let u = .15; u < s.L; u += .3) {
+        const x = s.a[0] + dx * u, z = s.a[1] + dz * u;
+        if (depthAt(u) < .15) continue;
+        const fy = groundY(x, z);
+        add(.95, .035, .12, [x, fy + .04, z], yaw, (Math.round(u * 3.3) % 2) ? 0x5a4a37 : 0x524433);
+        for (const side of [-.32, .32]) add(.07, .05, .31, [x + nx * side, fy + .005, z + nz * side], yaw, 0x3f3225);   // rails underneath
+      }
+      // sandbags piled two high along both edges
+      for (let u = -startExt * .5; u < s.L + endExt * .5; u += .55) {
+        if (depthAt(u) < .35) continue;
+        for (const side of [-1, 1]) for (const row of [0, 1]) {
+          const along = u + row * .27, out = half + .42 - row * .05;
+          const x = s.a[0] + dx * along + nx * side * out, z = s.a[1] + dz * along + nz * side * out;
+          if (trenchAt(x, z).d < half + .2) continue;                       // not where it would fall into a trench
+          add(.42, .22, .54, [x, groundY(x, z) + .11 + row * .21, z], yaw + rand(-.12, .12), bags[(Math.round(u * 1.8) + row + side + 3) % 3]);
+        }
+      }
+    });
+  }
+  mergedMesh(P);
+})();
+
 let houseMesh;
 (function makeHouse() {
   const { x0, x1, z0, z1, floor, t } = HOUSE;
@@ -548,7 +655,7 @@ const windTime = { value: 0 };
     const x = rand(-98, 98), z = rand(-73, 73);
     if (fbm(x * .09, z * .09) < rand(.25, .7)) continue;        // grows in patches
     if (wallGap(x, z) < .5 || track(x, z) > rand(.3, 1)) continue;
-    if (craters.some(c => Math.hypot(x - c.x, z - c.z) < c.r * .8) || inRect(x, z, HOUSE, .2)) continue;
+    if (craters.some(c => Math.hypot(x - c.x, z - c.z) < c.r * .8) || inRect(x, z, HOUSE, .2) || trenchAt(x, z).d < TRENCH.half + 1.4) continue;
     const s = rand(.7, 1.5);
     q.setFromAxisAngle(up, rand(0, 6.3));
     grass.setMatrixAt(n, m.compose(new THREE.Vector3(x, groundY(x, z), z), q, new THREE.Vector3(s, s * rand(.7, 1.3), s)));
@@ -567,7 +674,7 @@ const windTime = { value: 0 };
   let f = 0;
   for (let tries = 0; f < FLOWERS && tries < FLOWERS * 10; tries++) {
     const x = rand(-98, 98), z = rand(-73, 73);
-    if (fbm(x * .09, z * .09) < .5 || wallGap(x, z) < 1 || track(x, z) > .2 || inRect(x, z, HOUSE, 1)) continue;
+    if (fbm(x * .09, z * .09) < .5 || wallGap(x, z) < 1 || track(x, z) > .2 || inRect(x, z, HOUSE, 1) || trenchAt(x, z).d < TRENCH.half + 1.8) continue;
     if (craters.some(c => Math.hypot(x - c.x, z - c.z) < c.r * 1.3)) continue;
     flowers.setMatrixAt(f, m.compose(new THREE.Vector3(x, groundY(x, z) + rand(.25, .45), z), q, new THREE.Vector3(1, .6, 1)));
     flowers.setColorAt(f, col.set(pick(petals)));
@@ -707,8 +814,8 @@ function updateGrenades() {
   for (const g of grenades) {
     g.vy -= .012;                                         // gravity
     const nx = g.x + g.vx, nz = g.z + g.vz;
-    if (blocked(nx, g.z, g.r, g.y)) g.vx *= -.4; else g.x = nx;   // bounce off walls
-    if (blocked(g.x, nz, g.r, g.y)) g.vz *= -.4; else g.z = nz;
+    if (blocked(nx, g.z, g.r, g.y) || groundY(nx, g.z) > g.y + .2) g.vx *= -.4; else g.x = nx;   // bounce off walls and trench sides
+    if (blocked(g.x, nz, g.r, g.y) || groundY(g.x, nz) > g.y + .2) g.vz *= -.4; else g.z = nz;
     g.y += g.vy;
     const floor = supportY(g.x, g.z, g.y + .3) + .05;
     if (g.y < floor) { g.y = floor; g.vy = Math.abs(g.vy) > .03 ? -g.vy * .3 : 0; g.vx *= .55; g.vz *= .55; }   // bounce, then roll to a stop
@@ -725,9 +832,9 @@ function explode(g) {
   // anyone close enough, and not behind a wall, gets hurt: less the further away they are
   for (const v of [...enemies, ...players.filter(p => p.alive)]) {
     const d = Math.hypot(v.x - g.x, v.z - g.z, ((v.y || 0) + .9) - g.y);
-    if (d > GRENADE_RADIUS || !clearShot(at, v)) continue;
+    if (d > GRENADE_RADIUS || !clearShot(at, v, g.y + .5, (v.y || 0) + 1)) continue;
     const hurt = GRENADE_DAMAGE * (1 - d / GRENADE_RADIUS) * (v.num ? .6 : 1);   // your own grenade hurts you less
-    v.hp -= hurt; v.sinceHit = 0;
+    v.hp -= hurt; v.sinceHit = 0; v.lastHit = { blast: true, dx: v.x - g.x, dz: v.z - g.z };
     if (!v.num) { v.uni.emissive.setHex(0x777777); v.flash = 6; }
   }
   for (const p of players) p.shake = Math.max(p.shake || 0, clamp01(1 - Math.hypot(p.x - g.x, p.z - g.z) / 35) * 1.3);
@@ -767,6 +874,7 @@ function showItem(s) {
   if (!s.held || s.shownSlot === s.slot) return;
   s.shownSlot = s.slot;
   const id = s.inv[s.slot].id;
+  s.rifle.scale.set(1, 1, 1);                          // (in case it was dropped when he fell)
   if (id === "rifle") { s.torso.add(s.rifle); s.rifle.position.set(.1, 1.37, .02); s.rifle.rotation.set(0, 0, 0); }
   else { s.sling.add(s.rifle); s.rifle.position.set(0, 0, -.6); s.rifle.rotation.set(0, 0, 0); }
   for (const k in s.held) s.held[k].visible = k === id;
@@ -1251,7 +1359,7 @@ const enemyTracer = new THREE.MeshBasicMaterial({ color: 0xff9a3c });
 const puffGeo = new THREE.SphereGeometry(.3, 8, 6);
 
 function clearWorld() {
-  for (const o of [...players, ...enemies, ...fallen]) scene.remove(o.group);
+  for (const o of [...players, ...enemies, ...fallen]) { scene.remove(o.group); if (o.rifle && o.rifle.parent === scene) scene.remove(o.rifle); }
   for (const b of bullets) scene.remove(b.mesh);
   for (const p of puffs) scene.remove(p.mesh);
   for (const c of casings) scene.remove(c.mesh);
@@ -1284,7 +1392,7 @@ function nextWave() {
   spawnTimer = 0;
   waveTimer = 120;
   for (const p of players) {            // fallen soldiers come back, everyone patches up
-    if (!p.alive) { p.alive = true; p.hp = MAX_HP / 2; p.group.rotation.x = 0; p.group.position.y = 0; p.vx = p.vz = 0; p.jumpY = p.vy = 0; p.y = supportY(p.x, p.z, 99); p.sinceHit = 0; p.crouched = false; }
+    if (!p.alive) { p.alive = true; p.hp = MAX_HP / 2; p.death = null; p.rifleFall = null; p.shownSlot = undefined; p.group.rotation.set(0, 0, 0); p.vx = p.vz = 0; p.jumpY = p.vy = 0; p.y = supportY(p.x, p.z, 99); p.sinceHit = 0; p.crouched = false; }
     else p.hp = Math.min(MAX_HP, p.hp + MAX_HP / 4);
     if (wave > 1) for (const it of p.inv) if (ITEMS[it.id].perWave) it.count = Math.min(ITEMS[it.id].max, it.count + ITEMS[it.id].perWave);   // resupply
   }
@@ -1378,8 +1486,8 @@ function shoot(from, yaw, team, spread, target) {
       if (off < best && dist(from, e) < 45) { best = off; target = e; }
     }
   }
-  const h0 = (from.y || 0) + 1.5, reach = target ? Math.max(1, dist(from, target)) : 30;
-  const h1 = target ? (target.y || 0) + 1.25 : h0;
+  const h0 = (from.y || 0) + (from.crouched ? 1.2 : 1.5), reach = target ? Math.max(1, dist(from, target)) : 30;
+  const h1 = target ? (target.y || 0) + (target.crouched ? .85 : 1.25) : h0;
   const lift = Math.max(from.y || 0, team === "enemy" && target ? target.y || 0 : 0);
   const mesh = new THREE.Mesh(bulletGeo, team === "ally" ? allyTracer : enemyTracer);
   mesh.rotation.order = "YXZ"; mesh.rotation.set(-Math.atan2(h1 - h0, reach), a, 0); scene.add(mesh);
@@ -1494,7 +1602,7 @@ function update() {
   if (state !== "play" || paused) return;
   players.forEach(updatePlayer);
   enemies.forEach(updateEnemy);
-  for (const p of players) animateSoldier(p, !p.alive);
+  for (const p of players) if (p.alive) animateSoldier(p, false); else animateDeath(p);
   for (const e of enemies) animateSoldier(e, false);
 
   if (waveTimer > 0) waveTimer--;
@@ -1505,7 +1613,7 @@ function update() {
     b.y = b.h0 + (b.h1 - b.h0) * b.trav / b.reach;      // a straight line from the muzzle towards the target
     b.mesh.position.set(b.x, b.y, b.z);
     if (b.x < MINX || b.x > MAXX || b.z < MINZ || b.z > MAXZ) b.life = 0;
-    if (wallStopsShot(b.x, b.z, b.lift)) { b.life = 0; addPuff(b.x, Math.min(b.y, 2.5), b.z, 0xd6c9a0, 18, .06); }   // dust off the wall
+    if (wallStopsShot(b.x, b.z, b.y)) { b.life = 0; addPuff(b.x, Math.min(b.y, 2.5), b.z, 0xd6c9a0, 18, .06); }   // dust off the wall
     else if (b.y < groundY(b.x, b.z)) { b.life = 0; addPuff(b.x, groundY(b.x, b.z) + .1, b.z, 0x9a8a6a, 14, .05); }  // kicks up dirt
     const victims = b.team === "ally" ? enemies : players.filter(p => p.alive);
     for (const v of victims) {
@@ -1513,6 +1621,7 @@ function update() {
         b.life = 0;
         v.hp -= b.team === "ally" ? 20 : 12;
         v.sinceHit = 0;                                    // getting hit stops recovery for a while
+        v.lastHit = { dx: b.vx, dz: b.vz };               // which way the bullet was going (decides how they fall)
         if (v.uni && b.team === "ally") { v.uni.emissive.setHex(0x777777); v.flash = 6; }
         addPuff(b.x, b.y, b.z, 0xd0c4a4, 10, .04);
       }
@@ -1521,17 +1630,17 @@ function update() {
   for (const b of bullets) if (b.life <= 0) scene.remove(b.mesh);
   bullets = bullets.filter(b => b.life > 0);
 
-  for (const e of enemies) if (e.hp <= 0) { score += 100; e.fall = 0; fallen.push(e); }
+  for (const e of enemies) if (e.hp <= 0) { score += 100; e.fall = 0; startDeath(e, e.lastHit); fallen.push(e); }
   enemies = enemies.filter(e => e.hp > 0);
-  for (const f of fallen) {                 // knocked-out enemies topple, then fade away
+  for (const f of fallen) {                 // the dead lie where they fell for a while, then sink away
     f.fall++;
-    f.group.rotation.x = -Math.min(1, f.fall / 20) * Math.PI / 2;
-    if (f.fall > 150) f.group.position.y -= .02;
-    if (f.fall > 220) scene.remove(f.group);
+    animateDeath(f);
+    if (f.fall > 600) f.death.sink += .015;
+    if (f.fall > 680) { scene.remove(f.group); if (f.rifle.parent === scene) scene.remove(f.rifle); }
   }
-  fallen = fallen.filter(f => f.fall <= 220);
+  fallen = fallen.filter(f => f.fall <= 680);
 
-  for (const p of players) if (p.alive && p.hp <= 0) { p.alive = false; p.hp = 0; }
+  for (const p of players) if (p.alive && p.hp <= 0) { p.alive = false; p.hp = 0; startDeath(p, p.lastHit); }
 
   for (const p of puffs) {
     p.life--;
@@ -1561,7 +1670,112 @@ function update() {
 }
 
 // ---------- 6) DRAWING ----------
+// ---------- DYING: soldiers fall in different, natural ways ----------
+// Each way of falling is a few key poses over time (in game steps, 60 = 1 second); the body moves smoothly between them.
+// pitch: tip forward (+) or back (-) · roll: tip onto the side · twist: turn round · lift: raise off the ground when lying
+// drop: sink at the knees · lean: bend forward at the hips · side: bend sideways · hip / knee / splay: each leg [left, right]
+const DEATHS = {
+  crumple: [                         // knees give way, he sags, then slumps forward onto his face
+    [0, {}],
+    [10, { drop: -.3, hip: [-.55, -.4], knee: [1.2, 1], lean: .45 }],
+    [22, { drop: -.55, hip: [-1.1, -.9], knee: [2, 1.8], lean: .8, pitch: .3 }],
+    [38, { pitch: 1.5, lift: .17, drop: -.45, hip: [-.35, -.2], knee: [1.1, 1.5], lean: .25, side: .12 }],
+  ],
+  backward: [                        // the hit rocks him back off his feet
+    [0, {}],
+    [7, { lean: -.4, pitch: -.12, knee: [.45, .2] }],
+    [28, { pitch: -1.5, lift: .3, lean: -.1, hip: [-.55, -.2], knee: [.7, .35], splay: [.22, -.15] }],
+  ],
+  spin: [                            // spun round by the hit and dropped on his side
+    [0, {}],
+    [12, { twist: .9, roll: .25, drop: -.15, knee: [.6, .2], side: .3 }],
+    [32, { twist: 1.4, roll: 1.5, lift: .28, knee: [.95, .4], hip: [-.55, -.1], side: .2 }],
+  ],
+  kneel: [                           // drops to his knees, sways there, then topples over
+    [0, {}],
+    [14, { drop: -.55, hip: [-1.25, -1.25], knee: [2.3, 2.3], lean: .35 }],
+    [42, { drop: -.55, hip: [-1.2, -1.3], knee: [2.3, 2.3], lean: .65, side: .15 }],
+    [60, { roll: 1.45, pitch: .3, lift: .25, drop: -.3, hip: [-.9, -1.1], knee: [1.5, 1.8], lean: .4 }],
+  ],
+};
+const pickOne = (...ways) => ways[Math.floor(Math.random() * ways.length)];
+
+// choose how someone falls from what hit them: shot in the back, the front, the side, or thrown by a blast
+function startDeath(s, hit = {}) {
+  const f = forward(s.yaw), r = rightOf(s.yaw), len = Math.hypot(hit.dx || 0, hit.dz || 0) || 1;
+  const dx = (hit.dx || 0) / len, dz = (hit.dz || 0) / len;     // which way the bullet or blast was travelling
+  const ahead = dx * f.x + dz * f.z, across = dx * r.x + dz * r.z;
+  let type, mirror = Math.random() < .5 ? 1 : -1, fly = null;
+  if (hit.blast) {
+    type = ahead < 0 ? "backward" : "crumple";
+    fly = { x: dx * .13, z: dz * .13, y: .14 };                  // thrown through the air, away from the explosion
+  } else if (!hit.dx && !hit.dz) type = pickOne("crumple", "kneel");
+  else if (ahead > .35) type = pickOne("crumple", "crumple", "kneel");             // shot in the back: pitches forward
+  else if (ahead < -.35) type = pickOne("backward", "backward", "crumple", "kneel"); // shot from the front: knocked back
+  else { type = "spin"; mirror = across > 0 ? 1 : -1; }                           // from the side: spun round that way
+  if (Math.random() < .15 && !fly) type = "kneel";
+  s.death = { type, mirror, t: 0, ox: 0, oz: 0, oy: 0, sink: 0, fly, baseY: s.y ?? groundY(s.x, s.z) };
+}
+
+function dropRifle(s) {              // the rifle falls out of his hands
+  if (!s.rifle || s.rifle.parent === scene) return;
+  s.rifle.updateWorldMatrix(true, false);
+  const m = s.rifle.matrixWorld.clone();
+  scene.add(s.rifle);
+  m.decompose(s.rifle.position, s.rifle.quaternion, s.rifle.scale);
+  s.rifleFall = { vx: rand(-.02, .02), vy: .03, vz: rand(-.02, .02), spin: rand(-.12, .12), down: false,
+    flat: new THREE.Quaternion().setFromEuler(new THREE.Euler(0, rand(0, 6.3), Math.PI / 2, "YXZ")) };
+}
+
+function animateDeath(s) {
+  const d = s.death;
+  if (!d) return;
+  d.t++;
+  if (s.flash > 0 && --s.flash === 0) s.uni.emissive.setHex(0);
+  const keys = DEATHS[d.type];
+  let i = 0;
+  while (i < keys.length - 2 && d.t > keys[i + 1][0]) i++;
+  const [t0, a] = keys[i], [t1, b] = keys[i + 1], last = i === keys.length - 2;
+  let u = clamp01((d.t - t0) / (t1 - t0));
+  u = last ? u * u : u * u * (3 - 2 * u);              // the final drop speeds up like a real fall
+  const m = d.mirror;
+  const val = (k, j) => {
+    const get = p => p[k] === undefined ? 0 : Array.isArray(p[k]) ? p[k][m < 0 ? 1 - j : j] : p[k];
+    return get(a) + (get(b) - get(a)) * u;
+  };
+  for (let j = 0; j < 2; j++) {
+    s.hips[j].rotation.x = val("hip", j);
+    s.hips[j].rotation.z = val("splay", j) * m;
+    s.knees[j].rotation.x = val("knee", j);
+  }
+  s.body.position.y = val("drop"); s.body.rotation.z = 0;
+  s.upper.rotation.set(val("lean"), 0, val("side") * m); s.upper.position.z = 0;
+  // thrown by a blast: fly, land, slide a little
+  if (d.fly) {
+    d.ox += d.fly.x; d.oz += d.fly.z; d.oy += d.fly.y; d.fly.y -= .012;
+    if (d.oy <= 0 && d.fly.y < 0) { d.oy = 0; d.fly.x *= .6; d.fly.z *= .6; d.fly.y = 0; }
+  }
+  const x = s.x + d.ox, z = s.z + d.oz, floor = d.fly ? supportY(x, z, d.baseY + d.oy) : d.baseY;
+  s.group.position.set(x, floor + val("lift") + d.oy - d.sink, z);
+  s.group.rotation.set(val("pitch"), s.yaw + val("twist") * m, val("roll") * m);
+  if (d.t === 5) dropRifle(s);
+  // the dropped rifle falls, bounces once and lies flat
+  const rf = s.rifleFall;
+  if (rf && s.rifle.parent === scene) {
+    const g = s.rifle.position, ground = groundY(g.x, g.z) + .04;
+    if (!rf.down) {
+      g.x += rf.vx; g.y += rf.vy; g.z += rf.vz; rf.vy -= .012;
+      s.rifle.rotateX(rf.spin);
+      if (g.y <= ground) { g.y = ground; rf.down = true; }
+    } else {
+      s.rifle.quaternion.slerp(rf.flat, .3);
+      g.y += (ground - g.y) * .3;
+    }
+  }
+}
+
 function poseSoldier(s, down) {
+  if (s.death) return;                                 // the dying are moved by animateDeath
   s.group.position.set(s.x, s.y ?? groundY(s.x, s.z), s.z);           // feet on the ground, the stairs or the floor (or in the air)
   s.group.rotation.y = s.yaw;
   if (down) s.group.rotation.x = Math.max(s.group.rotation.x - .08, -Math.PI / 2);

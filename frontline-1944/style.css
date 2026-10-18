@@ -1,0 +1,58 @@
+/* Basic reset (the hosted page added this automatically) */
+[hidden] { display: none !important; }
+body { margin: 0; }
+
+/* Layout: one framed 3D battlefield, like a field map pinned to a board; HUD and menus sit on top of it. */
+:root {
+  --board: #23251c;
+  --paper: #e9e1c8;
+  --khaki: #c9b77a;   /* soldier 1 */
+  --sky: #9ec3e6;     /* soldier 2 */
+  --muted: #a49c80;
+  --display: "Stardos Stencil", "Impact", "Arial Black", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "Consolas", monospace;
+  color-scheme: dark;
+}
+html, body { height: 100%; }
+body {
+  background: var(--board); color: var(--paper); font-family: var(--mono);
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 16px; box-sizing: border-box;
+}
+.wrap { max-width: 1100px; margin: 0 auto; display: flex; flex-direction: column; gap: 12px; }
+header { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 8px; }
+h1 { font-family: var(--display); font-size: clamp(28px, 5vw, 44px); margin: 0; letter-spacing: .04em; }
+.tag { font-size: 12px; color: var(--muted); letter-spacing: .12em; text-transform: uppercase; }
+.stage { position: relative; width: 100%; aspect-ratio: 16 / 10; max-width: 100%; border: 2px solid #4a4c3a; background: #9fa48a; overflow: hidden; }
+canvas { display: block; width: 100%; height: 100%; }
+
+/* HUD */
+.pane { position: absolute; top: 0; bottom: 0; pointer-events: none; }
+.pane.split + .pane.split { border-left: 3px solid var(--board); }
+.info { position: absolute; top: 10px; left: 10px; background: rgba(20, 22, 16, .72); padding: 8px 10px; display: grid; gap: 5px; min-width: 150px; font-size: 13px; font-weight: 600; }
+.bar { height: 7px; background: rgba(0, 0, 0, .5); }
+.bar i { display: block; height: 100%; background: currentColor; }
+#pane2 .info { left: auto; right: 10px; }
+.cross { position: absolute; left: 50%; top: 42%; width: 22px; height: 22px; margin: -11px 0 0 -11px; }
+.cross::before, .cross::after { content: ""; position: absolute; background: rgba(255, 250, 230, .9); }
+.cross::before { left: 10px; top: 0; width: 2px; height: 22px; }
+.cross::after { top: 10px; left: 0; height: 2px; width: 22px; }
+.topline { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); background: rgba(20, 22, 16, .72); padding: 6px 12px; font-size: 13px; font-weight: 600; white-space: nowrap; pointer-events: none; }
+.banner { position: absolute; top: 22%; left: 0; right: 0; text-align: center; font-family: var(--display); font-size: clamp(36px, 8vw, 80px); letter-spacing: .06em; text-shadow: 0 3px 0 rgba(0,0,0,.4); pointer-events: none; transition: opacity .4s; }
+.hint { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); background: rgba(20, 22, 16, .8); padding: 6px 12px; font-size: 12px; white-space: nowrap; pointer-events: none; }
+
+.overlay {
+  position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 14px; background: rgba(28, 30, 22, .7); text-align: center; padding: 16px;
+}
+.overlay h2 { font-family: var(--display); font-size: clamp(30px, 6vw, 64px); margin: 0; letter-spacing: .05em; text-wrap: balance; }
+.overlay p { margin: 0; max-width: 48ch; color: var(--paper); line-height: 1.5; font-size: 14px; }
+.btns { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
+button { font-family: var(--display); font-size: 20px; letter-spacing: .06em; padding: 10px 22px; background: var(--paper); color: var(--board); border: 0; cursor: pointer; }
+button:hover { background: var(--khaki); }
+button:focus-visible { outline: 3px solid var(--sky); outline-offset: 3px; }
+.controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 12px; font-size: 13px; line-height: 1.7; }
+.controls div { min-width: 0; }
+.controls b { font-family: var(--display); font-size: 18px; letter-spacing: .05em; font-weight: 400; }
+kbd { font-family: var(--mono); background: #3a3c2e; padding: 1px 6px; border-radius: 3px; }

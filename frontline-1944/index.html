@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Frontline 1944</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Stardos+Stencil:wght@400;700&family=IBM+Plex+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>FRONTLINE 1944</h1>
+    <span class="tag">Hold the line · survive the waves</span>
+  </header>
+
+  <div class="stage" id="stage">
+    <canvas id="game"></canvas>
+
+    <div class="pane" id="pane1" hidden>
+      <div class="info" style="color: var(--khaki)">
+        <span id="name1">SOLDIER 1</span>
+        <div class="bar"><i id="hp1"></i></div>
+        <span id="ammo1" style="color: var(--paper)"></span>
+      </div>
+      <div class="cross"></div>
+    </div>
+    <div class="pane" id="pane2" hidden>
+      <div class="info" style="color: var(--sky)">
+        <span id="name2">SOLDIER 2</span>
+        <div class="bar"><i id="hp2"></i></div>
+        <span id="ammo2" style="color: var(--paper)"></span>
+      </div>
+      <div class="cross"></div>
+    </div>
+    <div class="topline" id="topline" hidden></div>
+    <div class="banner" id="banner"></div>
+    <div class="hint" id="hint" hidden>Click the battlefield to aim with the mouse · Esc lets go</div>
+
+    <div class="overlay" id="menu">
+      <h2>FRONTLINE 1944</h2>
+      <p>You are an infantry soldier holding a field position. Enemy squads attack in waves. Use the sandbags for cover. Play alone, or split-screen with a friend on the same keyboard.</p>
+      <div class="btns">
+        <button id="btn1">1 PLAYER</button>
+        <button id="btn2">2 PLAYERS</button>
+      </div>
+    </div>
+    <div class="overlay" id="over" hidden>
+      <h2>POSITION LOST</h2>
+      <p id="overText"></p>
+      <div class="btns"><button id="btnAgain">FIGHT AGAIN</button><button id="btnMenu">MENU</button></div>
+    </div>
+  </div>
+
+  <div class="controls">
+    <div><b>1 PLAYER</b><br>Move <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> · Click the map, then aim with the mouse · Shoot: click or <kbd>Space</kbd> · Reload <kbd>R</kbd> · No mouse? Turn with <kbd>←</kbd><kbd>→</kbd></div>
+    <div><b>2 PLAYERS (split screen)</b><br>Soldier 1: <kbd>W</kbd><kbd>S</kbd> walk, <kbd>A</kbd><kbd>D</kbd> turn, <kbd>Space</kbd> shoot, <kbd>R</kbd> reload<br>Soldier 2: arrows walk and turn, <kbd>Enter</kbd> shoot, right <kbd>Shift</kbd> reload</div>
+    <div><b>GAME</b><br>Pause <kbd>P</kbd> · A fallen soldier returns at the start of the next wave · Needs a keyboard</div>
+  </div>
+</div>
+
+<!-- Three.js draws the 3D world. It loads from the internet, so you need to be online. -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="game.js"></script>
+</body>
+</html>

@@ -167,31 +167,74 @@ for (let i = 0; i < 60; i++) {
 function buildSoldier(uniformColor, helmetColor, enemy) {
   const g = new THREE.Group();
   g.rotation.order = "YXZ";
-  const uni = new THREE.MeshLambertMaterial({ color: uniformColor });
-  const dark = new THREE.MeshLambertMaterial({ color: 0x24241e });
-  const skin = new THREE.MeshLambertMaterial({ color: 0xd8b08c });
-  const helm = new THREE.MeshLambertMaterial({ color: helmetColor });
-  const wood = new THREE.MeshLambertMaterial({ color: 0x5a3d22 });
+  // smooth per-pixel lighting so rounded parts don't show jagged patches
+  const mat = color => new THREE.MeshPhongMaterial({ color, shininess: 6, specular: 0x151515 });
+  const uni = mat(uniformColor);
+  const dark = mat(0x24241e);
+  const skin = mat(0xd8b08c);
+  const helm = mat(helmetColor);
+  const wood = mat(0x5a3d22);
   const part = (geo, mat, x, y, z, parent = g) => {
     const m = new THREE.Mesh(geo, mat); m.position.set(x, y, z); m.castShadow = true; parent.add(m); return m;
   };
-  const legs = [-.15, .15].map(side => {
-    const hip = new THREE.Group(); hip.position.set(side, .85, 0); g.add(hip);
-    part(new THREE.BoxGeometry(.22, .78, .24), uni, 0, -.39, 0, hip);
-    part(new THREE.BoxGeometry(.24, .14, .34), dark, 0, -.8, .04, hip);
+  const webbing = mat(enemy ? 0x2b2b26 : 0x8a7f55);
+  // a rounded limb running from point a to point b
+  const limb = (a, b, r1, r2, mat) => {
+    const from = new THREE.Vector3(...a), to = new THREE.Vector3(...b);
+    const len = from.distanceTo(to);
+    const m = part(new THREE.CylinderGeometry(r2, r1, len, 16), mat, 0, 0, 0);
+    m.position.copy(from).add(to).multiplyScalar(.5);
+    m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), to.clone().sub(from).normalize());
+    part(new THREE.SphereGeometry(r2 * 1.12, 16, 12), mat, ...b);       // rounded joint (a bit wider so it doesn't flicker)
+    return m;
+  };
+
+  // legs: thigh, knee, shin and boot, all inside the hip so they swing together
+  const legs = [-.13, .13].map(side => {
+    const hip = new THREE.Group(); hip.position.set(side, .9, 0); g.add(hip);
+    part(new THREE.CylinderGeometry(.13, .11, .44, 16), uni, 0, -.2, 0, hip);    // thigh
+    part(new THREE.SphereGeometry(.122, 16, 12), uni, 0, -.43, .01, hip);         // knee
+    part(new THREE.CylinderGeometry(.1, .085, .36, 16), uni, 0, -.6, 0, hip);    // shin
+    part(new THREE.CylinderGeometry(.095, .1, .14, 24), dark, 0, -.76, 0, hip);  // boot top
+    part(new THREE.BoxGeometry(.18, .1, .32), dark, 0, -.85, .05, hip);          // boot
     return hip;
   });
-  part(new THREE.BoxGeometry(.6, .72, .34), uni, 0, 1.22, 0);           // body
-  part(new THREE.BoxGeometry(.62, .08, .36), dark, 0, .9, 0);           // belt
-  part(new THREE.BoxGeometry(.4, .4, .16), uni, 0, 1.25, -.24);         // backpack
-  part(new THREE.SphereGeometry(.17, 12, 10), skin, 0, 1.76, 0);        // head
-  part(new THREE.SphereGeometry(.23, 14, 8, 0, Math.PI * 2, 0, Math.PI / 2), helm, 0, 1.8, 0);
-  if (enemy) part(new THREE.CylinderGeometry(.24, .28, .14, 16), helm, 0, 1.75, -.02);   // flared helmet
-  else part(new THREE.CylinderGeometry(.33, .33, .03, 16), helm, 0, 1.8, 0);              // wide-brim helmet
-  part(new THREE.BoxGeometry(.15, .15, .55), uni, .3, 1.32, .22);       // arms
-  part(new THREE.BoxGeometry(.15, .15, .6), uni, -.18, 1.32, .34);
-  part(new THREE.BoxGeometry(.07, .1, 1.0), wood, .1, 1.36, .55);       // rifle
+
+  // torso: hips, waist, then a broader chest and shoulders (a fit, normal soldier build)
+  part(new THREE.BoxGeometry(.42, .2, .27), uni, 0, .95, 0);             // hips
+  part(new THREE.CylinderGeometry(.24, .21, .3, 12), uni, 0, 1.15, 0).scale.set(1, 1, .68);   // waist
+  part(new THREE.CylinderGeometry(.29, .25, .32, 12), uni, 0, 1.42, 0).scale.set(1, 1, .62);  // chest
+  part(new THREE.BoxGeometry(.6, .1, .26), uni, 0, 1.56, -.01);          // shoulder line
+  [-.29, .29].forEach(x => part(new THREE.SphereGeometry(.11, 16, 12), uni, x, 1.53, 0));      // shoulders
+  part(new THREE.BoxGeometry(.5, .07, .32), dark, 0, 1.02, 0);           // belt
+  part(new THREE.BoxGeometry(.07, .06, .02), helm, 0, 1.02, .165);       // buckle
+  [-.16, .16].forEach(x => part(new THREE.BoxGeometry(.11, .1, .07), webbing, x, 1.04, .17));  // ammo pouches
+  [-.13, .13].forEach(x => part(new THREE.BoxGeometry(.05, .5, .03), webbing, x, 1.3, .2));    // chest straps
+  [-.13, .13].forEach(x => part(new THREE.BoxGeometry(.05, .5, .03), webbing, x, 1.3, -.2));   // back straps
+  part(new THREE.BoxGeometry(.36, .36, .14), webbing, 0, 1.3, -.24);     // backpack
+  part(new THREE.BoxGeometry(.34, .06, .1), webbing, 0, 1.5, -.22);      // bedroll on top
+
+  // neck and head
+  part(new THREE.CylinderGeometry(.075, .085, .14, 24), skin, 0, 1.64, 0);
+  part(new THREE.SphereGeometry(.13, 20, 16), skin, 0, 1.77, .01).scale.set(.95, 1.1, 1);
+  part(new THREE.BoxGeometry(.17, .08, .14), skin, 0, 1.68, .05);        // jaw
+  part(new THREE.BoxGeometry(.035, .06, .05), skin, 0, 1.75, .14);       // nose
+  [-.125, .125].forEach(x => part(new THREE.SphereGeometry(.03, 6, 6), skin, x, 1.76, 0));     // ears
+  part(new THREE.SphereGeometry(.2, 24, 12, 0, Math.PI * 2, 0, Math.PI / 2), helm, 0, 1.82, 0);
+  if (enemy) part(new THREE.CylinderGeometry(.21, .25, .14, 24), helm, 0, 1.77, -.02);   // flared helmet
+  else part(new THREE.CylinderGeometry(.3, .3, .03, 24), helm, 0, 1.82, 0);               // wide-brim helmet
+
+  // arms holding the rifle: upper arm, elbow, forearm, hand
+  limb([.3, 1.52, 0], [.33, 1.24, .1], .085, .075, uni);                 // right arm
+  limb([.33, 1.24, .1], [.14, 1.33, .3], .072, .062, uni);
+  part(new THREE.SphereGeometry(.055, 12, 10), skin, .13, 1.33, .32);    // right hand
+  limb([-.3, 1.52, 0], [-.25, 1.22, .38], .085, .075, uni);              // left arm
+  limb([-.25, 1.22, .38], [.06, 1.32, .72], .072, .062, uni);
+  part(new THREE.SphereGeometry(.055, 12, 10), skin, .08, 1.32, .75);    // left hand
+
+  part(new THREE.BoxGeometry(.07, .1, 1.0), wood, .1, 1.36, .55);        // rifle
   part(new THREE.BoxGeometry(.04, .04, .45), dark, .1, 1.39, 1.25);
+  g.scale.setScalar(1.1);                                                // a bit bigger than standard
   scene.add(g);
   return { group: g, legs, uni };
 }
@@ -271,7 +314,7 @@ function shoot(from, yaw, team, spread) {
   const mesh = new THREE.Mesh(bulletGeo, team === "ally" ? allyTracer : enemyTracer);
   mesh.rotation.y = a; scene.add(mesh);
   bullets.push({ x: from.x + f.x * 1.2, z: from.z + f.z * 1.2, vx: f.x * BULLET_SPEED, vz: f.z * BULLET_SPEED, team, life: 60, mesh });
-  addPuff(from.x + f.x * 1.5, 1.38, from.z + f.z * 1.5, 0xffe9a0, 4, 0);   // muzzle flash
+  addPuff(from.x + f.x * 1.6, 1.52, from.z + f.z * 1.6, 0xffe9a0, 4, 0);   // muzzle flash
 }
 
 function updatePlayer(p) {

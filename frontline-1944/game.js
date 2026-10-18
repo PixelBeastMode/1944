@@ -7,18 +7,25 @@
 //            5 game rules · 6 drawing · 7 controls
 // ============================================================
 
+const BUILD = 21;             // shown on screen, so you can tell the browser loaded the newest version
+document.querySelector(".tag").textContent += " · build " + BUILD;
+
 // ---------- 1) SETTINGS: change these to tweak the game ----------
 const PLAYER_SPEED = 0.15;    // map units per frame (60 frames = 1 second)
 const SPRINT_SPEED = 0.23;    // holding sprint while moving forward
 const AGILITY = 0.28;         // how quickly soldiers speed up and stop (1 = instant)
 const JUMP_POWER = 0.1;       // how fast you leave the ground (higher = jump higher)
 const GRAVITY = 0.0085;       // how fast you come back down
+const CROUCH_SPEED = 0.5;     // crouched walking speed, compared with normal walking
 const ENEMY_SPEED = 0.08;
 const ENEMY_TURN = 0.12;      // how fast enemies swing round to face you
 const BULLET_SPEED = 1.1;
 const TURN_SPEED = 0.045;     // how fast the keys turn you
 const MOUSE_SENSITIVITY = 0.0025;
-const MAX_HP = 150;          // how much health a soldier has
+const INVERT_LOOK = true;     // true: moving down on the mouse or trackpad looks up
+const MAX_HP = 180;          // how much health a soldier has
+const REGEN_DELAY = 150;      // frames without being hit before health starts coming back (60 = 1 second)
+const REGEN_RATE = 0.15;      // health regained per frame while recovering (0.15 = 9 per second)
 const MAG_SIZE = 8;
 const RELOAD_TIME = 70;
 const MINX = -48, MAXX = 48, MINZ = -30, MAXZ = 30;   // edges of the battlefield
@@ -36,7 +43,76 @@ const walls = [
   { x: -18, z: -26, w: 10, d: 1.2, type: "ruin" },
   { x: 8,   z: 24.8, w: 10, d: 1.2, type: "ruin" },
 ];
+for (const w of walls) w.top = w.type === "bags" ? 1.3 : 2.6;   // how tall each wall is (bullets fly over low ones from up high)
 
+// ---------- the bombed-out house: two storeys, the top one mostly blown away into an open flat roof ----------
+const HOUSE = { x0: 19, x1: 33, z0: 0, z1: 10, floor: 3.2, t: .3, inner: 26 };   // outside corners, upstairs floor height, wall thickness, inside wall
+const STAIRS = { x0: 19.9, x1: 24.9, z0: 8.1, z1: 9.7 };           // wide stairs in the west room: ground at the east end (with room to stand), upstairs at the west end
+const STAIRWELL = { x0: 19.8, x1: 25.2, z0: 8, z1: 9.7 };          // the opening in the upstairs floor above the stairs
+const HOLE = { x0: 29.5, x1: 33, z0: 0, z1: 4 };                   // corner where the upstairs floor has collapsed
+const inRect = (x, z, r, m = 0) => x >= r.x0 - m && x <= r.x1 + m && z >= r.z0 - m && z <= r.z1 + m;
+const houseBlocks = [], houseOpenings = [];   // blocks of wall (for drawing and collisions); doors and windows (for their frames)
+(function planHouse() {
+  const { x0, x1, z0, z1, floor, t, inner } = HOUSE;
+  const sides = {                    // what each wall is made of, along its length: [from, to, kind]
+    s: { fixed: z0 + t / 2, alongX: true, pieces: [[x0, 21.5, "solid"], [21.5, 23, "door"], [23, 24, "solid"], [24, 25.3, "window"], [25.3, 27.5, "solid"], [27.5, 28.8, "window"], [28.8, x1, "solid"]] },
+    n: { fixed: z1 - t / 2, alongX: true, pieces: [[x0, 27.2, "solid"], [27.2, 28.5, "window"], [28.5, 30.5, "solid"], [30.5, 31.8, "window"], [31.8, x1, "solid"]] },
+    w: { fixed: x0 + t / 2, alongX: false, pieces: [[z0 + t, 3.8, "solid"], [3.8, 5.2, "window"], [5.2, z1 - t, "solid"]] },
+    e: { fixed: x1 - t / 2, alongX: false, pieces: [[z0 + t, 4.2, "solid"], [4.2, 6.6, "blast"], [6.6, z1 - t, "solid"]] },
+    p: { fixed: inner, alongX: false, pieces: [[z0 + t, 3.4, "solid"], [3.4, 4.8, "door"], [4.8, z1 - t, "solid"]], inside: true },   // wall between the two rooms
+  };
+  let n = 0;
+  const block = (side, a, b, y0, y1, kind) => {
+    const s = sides[side], c = (a + b) / 2, len = b - a;
+    houseBlocks.push({ x: s.alongX ? c : s.fixed, z: s.alongX ? s.fixed : c, w: s.alongX ? len : t, d: s.alongX ? t : len, y0, y1, kind, n: n++ });
+  };
+  const collide = (side, a, b, base, top) => {
+    const s = sides[side];
+    walls.push({ x: s.alongX ? a : s.fixed - t / 2, z: s.alongX ? s.fixed - t / 2 : a, w: s.alongX ? b - a : t, d: s.alongX ? t : b - a, type: "house", base, top });
+  };
+  for (const side in sides) {
+    const s = sides[side];
+    // downstairs: whole walls, with doors, windows and a blast hole
+    for (const [a, b, kind] of s.pieces) {
+      for (let c = a; c < b - .01; c += .5) {
+        const cb = Math.min(b, c + .5);
+        if (kind === "solid") block(side, c, cb, 0, floor, "wall");
+        else if (kind === "window") { block(side, c, cb, 0, 1, "wall"); block(side, c, cb, 2.3, floor, "wall"); }
+        else if (kind === "door") block(side, c, cb, 2.3, floor, "wall");
+        else block(side, c, cb, 1.8 + hash2(c * 7.1, 3.3) * .9, floor, "blasted");      // ragged top of the blast hole
+      }
+      if (kind === "solid") collide(side, a, b, 0, floor);
+      if (kind === "window") collide(side, a, b, 0, 1);       // the sill stops you walking through, but you can shoot over it
+      if (kind === "window" || kind === "door") houseOpenings.push({ kind, x: s.alongX ? (a + b) / 2 : s.fixed, z: s.alongX ? s.fixed : (a + b) / 2, width: b - a, alongX: s.alongX });
+    }
+    if (s.inside) continue;
+    // upstairs: only broken stubs of wall are left, standing on the open floor
+    const from = s.alongX ? x0 : z0 + t, to = s.alongX ? x1 : z1 - t;
+    for (let c = from, i = 0; c < to - .01; c += .5, i++) {
+      const cb = Math.min(to, c + .5), mid = (c + cb) / 2;
+      if (s.alongX ? inRect(mid, s.fixed, HOLE, .3) : inRect(s.fixed, mid, HOLE, .3)) continue;   // gone with the collapsed corner
+      const v = noise2(i * .32 + side.charCodeAt(0) * 7, 1.7);                                  // heights rise and fall along the wall
+      let h = v < .36 ? 0 : (v - .36) * 4.6 + hash2(i * 3.7, side.charCodeAt(0)) * .25;
+      if (i < 3 && (side === "n" || side === "w")) h = 2.2 + v * .5;                            // a tall corner still standing
+      if (h < .12) continue;
+      block(side, c, cb, floor, floor + h, "upper");
+      collide(side, c, cb, floor, floor + h);
+    }
+  }
+})();
+// how high the floor is under a soldier: the ground, the stairs, or the upstairs floor
+function stairsY(x, z) {
+  if (z < STAIRS.z0 - .35 || z > STAIRS.z1 || x < STAIRS.x0 - .3 || x > STAIRS.x1 + .4) return -1;
+  return HOUSE.floor * clamp01((STAIRS.x1 - x) / (STAIRS.x1 - STAIRS.x0));
+}
+function supportY(x, z, y) {         // the highest floor below someone at height y that they can step onto
+  let best = groundY(x, z);
+  const reach = y + .55;
+  const s = stairsY(x, z);
+  if (s > best && s <= reach) best = s;
+  if (inRect(x, z, HOUSE) && !inRect(x, z, STAIRWELL) && !inRect(x, z, HOLE) && HOUSE.floor <= reach) best = Math.max(best, HOUSE.floor);
+  return best;
+}
 // ---------- helpers for the flat map ----------
 const rand = (a, b) => a + Math.random() * (b - a);
 const dist = (a, b) => Math.hypot(a.x - b.x, a.z - b.z);
@@ -46,23 +122,26 @@ function circleHitsRect(cx, cz, r, w) {
   return (cx - nx) ** 2 + (cz - nz) ** 2 < r * r;
 }
 const insideWall = (x, z) => walls.some(w => x > w.x && x < w.x + w.w && z > w.z && z < w.z + w.d);
-function blocked(x, z, r) {
+function blocked(x, z, r, y = 0) {  // y = how high the soldier's feet are: walls only block at their own height
   if (x < MINX + r || x > MAXX - r || z < MINZ + r || z > MAXZ - r) return true;
-  return walls.some(w => circleHitsRect(x, z, r, w));
+  return walls.some(w => y < w.top - .25 && y > (w.base || 0) - .6 && circleHitsRect(x, z, r, w));
 }
 function move(o, dx, dz) {           // slide along walls instead of sticking
-  if (!blocked(o.x + dx, o.z, o.r)) o.x += dx; else o.vx = 0;
-  if (!blocked(o.x, o.z + dz, o.r)) o.z += dz; else o.vz = 0;
+  if (!blocked(o.x + dx, o.z, o.r, o.y || 0)) o.x += dx; else o.vx = 0;
+  if (!blocked(o.x, o.z + dz, o.r, o.y || 0)) o.z += dz; else o.vz = 0;
 }
+// does a wall stop a shot here? lift = the height of whoever is higher up, the shooter or the target:
+// from up high you fire over low walls, and anyone can fire over a windowsill
+const wallStopsShot = (x, z, lift) => walls.some(w => x > w.x && x < w.x + w.w && z > w.z && z < w.z + w.d && w.top > lift + 1 && (w.base || 0) < lift + 1.6);
 function steer(o, tx, tz, agility) { // ease towards the wanted speed, so soldiers have a bit of weight
   o.vx += (tx - o.vx) * agility;
   o.vz += (tz - o.vz) * agility;
   move(o, o.vx, o.vz);
 }
 function clearShot(a, b) {           // can a bullet get from a to b?
-  const steps = Math.ceil(dist(a, b) / 0.8);
+  const steps = Math.ceil(dist(a, b) / 0.8), lift = Math.max(a.y || 0, b.y || 0);
   for (let i = 1; i < steps; i++) {
-    if (insideWall(a.x + (b.x - a.x) * i / steps, a.z + (b.z - a.z) * i / steps)) return false;
+    if (wallStopsShot(a.x + (b.x - a.x) * i / steps, a.z + (b.z - a.z) * i / steps, lift)) return false;
   }
   return true;
 }
@@ -122,7 +201,8 @@ for (let tries = 0; craters.length < 24 && tries < 600; tries++) {
 // how high the ground is at a spot: gentle rolls (flat by the walls) plus crater dips with raised rims
 function groundY(x, z) {
   const edge = clamp01((100 - Math.abs(x)) / 12) * clamp01((75 - Math.abs(z)) / 12);
-  let y = (fbm(x * .07, z * .07) - .5) * .55 * Math.min(1, wallGap(x, z) / 3) * edge;
+  const nearHouse = Math.hypot(Math.max(HOUSE.x0 - .5 - x, 0, x - HOUSE.x1 - .5), Math.max(HOUSE.z0 - .5 - z, 0, z - HOUSE.z1 - .5));
+  let y = (fbm(x * .07, z * .07) - .5) * .55 * Math.min(1, wallGap(x, z) / 3) * edge * clamp01(nearHouse / 1.5);   // level where the house stands
   for (const c of craters) {
     const d = Math.hypot(x - c.x, z - c.z) / c.r;
     if (d < 1.7) y += c.r * .14 * (-Math.max(0, 1 - d * d) + .35 * Math.exp(-(((d - 1) * 3.5) ** 2)));
@@ -184,6 +264,7 @@ const bagMat = new THREE.MeshLambertMaterial({ color: 0xb9a676 });
 const bagMat2 = new THREE.MeshLambertMaterial({ color: 0xa8956a });
 const brickMat = new THREE.MeshLambertMaterial({ color: 0x8c6a56 });
 for (const w of walls) {
+  if (w.type === "house") continue;                   // the house is drawn separately
   const long = w.w > w.d, len = long ? w.w : w.d, thick = long ? w.d : w.w;
   if (w.type === "bags") {
     for (let row = 0; row < 3; row++) {
@@ -251,10 +332,11 @@ function mergeParts(parts, dapple = .24, smooth = false) {
     q.setFromEuler(new THREE.Euler(...(pt.rot || [0, 0, 0])));
     g.applyMatrix4(m.compose(new THREE.Vector3(...pt.at), q, new THREE.Vector3(...(pt.scale || [1, 1, 1]))));
     const p = g.attributes.position.array, n = g.attributes.normal.array, own = g.attributes.color;   // own = colours painted on the shape
+    const ownFab = g.attributes.fabric;
     for (let i = 0; i < p.length; i += 3) {
       pos.push(p[i], p[i + 1], p[i + 2]);
       nors.push(n[i], n[i + 1], n[i + 2]);
-      fabs.push(pt.fabric || 0);
+      fabs.push(ownFab ? ownFab.array[i / 3] : pt.fabric || 0);
       (own ? c.fromArray(own.array, i) : c.set(pt.color)).multiplyScalar(1 - dapple / 2 + hash2(p[i] * 3.1, p[i + 2] * 2.7 + p[i + 1]) * dapple);   // dappled colour
       cols.push(c.r, c.g, c.b);
     }
@@ -338,7 +420,7 @@ const outsideFence = (x, z, gap) => Math.abs(x) > MAXX + gap || Math.abs(z) > MA
   for (const c of craters) for (let i = 0; i < 5; i++) { const a = rand(0, 6.3), d = c.r * rand(.9, 1.3); spots.push([c.x + Math.cos(a) * d, c.z + Math.sin(a) * d, .12]); }
   for (let i = 0; i < 60; i++) spots.push([rand(-90, 90), rand(-66, 66), .22]);
   for (const [x, z, s0] of spots) {
-    if (insideWall(x, z)) continue;
+    if (insideWall(x, z) || inRect(x, z, HOUSE, .3)) continue;
     const s = s0 * rand(.6, 1.6);
     parts.push({ geo: lumpy(new THREE.DodecahedronGeometry(1, 0), .5), at: [x, groundY(x, z) + s * .25, z],
       scale: [s * rand(1, 1.6), s * rand(.6, 1), s * rand(1, 1.4)], rot: [rand(0, 3), rand(0, 6), rand(0, 3)], color: pick(stone) });
@@ -346,6 +428,88 @@ const outsideFence = (x, z, gap) => Math.abs(x) > MAXX + gap || Math.abs(z) > MA
   mergedMesh(parts);
 })();
 
+// The bombed-out house: plaster walls with patches of bare brick, scorched round the damage,
+// a staircase, floorboards upstairs, a collapsed corner with hanging slabs and charred beams, and heaps of rubble
+let houseMesh;
+(function makeHouse() {
+  const { x0, x1, z0, z1, floor, t } = HOUSE;
+  const P = [], col = new THREE.Color(), soot = new THREE.Color(0x2b2520);
+  const box = (w, h, d, at, color, rot) => P.push({ geo: new THREE.BoxGeometry(w, h, d), at, color, rot });
+  const hx = (HOLE.x0 + HOLE.x1) / 2, hz = (HOLE.z0 + HOLE.z1) / 2;
+  const blast = [x1, 2.4, 5.4], hole = [hx, floor, hz], bump = (v, w) => Math.exp(-((v / w) ** 2));
+  const burnt = (x, y, z) => Math.max(bump(Math.hypot(x - blast[0], y - blast[1], z - blast[2]), 2.1), bump(Math.hypot(x - hole[0], y - hole[1], z - hole[2]), 2.6));
+  const plaster = [0xbab1a0, 0xb0a794, 0xc3b9a7], brick = [0x8b5a44, 0x7b4b39, 0x985f47];
+
+  // walls: plaster, with bare brick showing in places and at every broken edge, blackened near the damage
+  for (const b of houseBlocks) {
+    const bare = noise2((b.x + b.z) * .7, b.y0 * .4 + 3) > .66 || b.kind === "blasted";   // bare brick shows in patches
+    const scorch = burnt(b.x, (b.y0 + b.y1) / 2, b.z) * .8;
+    const paint = c => col.set(c).lerp(soot, scorch).getHex();
+    const thin = b.w < b.d ? "w" : "d", inset = bare ? .03 : 0;   // bare brick sits a little behind the plaster
+    const w = b.w - (thin === "w" ? inset : 0), d = b.d - (thin === "d" ? inset : 0), h = b.y1 - b.y0;
+    if (b.kind === "upper" && h > .3) {              // broken top shows the bricks
+      box(w, h - .2, d, [b.x, b.y0 + (h - .2) / 2, b.z], paint(bare ? brick[b.n % 3] : plaster[b.n % 3]));
+      box(b.w * .96, .2 + hash2(b.n, 2) * .12, b.d * .96, [b.x, b.y1 - .08, b.z], paint(brick[(b.n + 1) % 3]), [0, 0, (hash2(b.n, 4) - .5) * .2]);
+    } else box(w, h, d, [b.x, (b.y0 + b.y1) / 2, b.z], paint(bare ? brick[b.n % 3] : plaster[b.n % 3]));
+  }
+  // window frames with broken bars, and door frames
+  const wood = 0x4a3726, charred = 0x221c17;
+  for (const o of houseOpenings) {
+    const along = (dx, dz) => o.alongX ? [o.x + dx, 0, o.z + dz] : [o.x + dz, 0, o.z + dx];
+    const sized = (w, h, d) => o.alongX ? [w, h, d] : [d, h, w];
+    const half = o.width / 2;
+    if (o.kind === "window") {
+      const [sx, , sz] = along(0, 0); box(...sized(o.width, .06, .36), [sx, 1.02, sz], wood);              // sill
+      for (const s of [-half + .04, half - .04]) { const [px, , pz] = along(s, 0); box(...sized(.07, 1.3, .32), [px, 1.65, pz], wood); }
+      const [cx, , cz] = along(.1, 0); box(...sized(.07, .9, .3), [cx, 1.6, cz], charred, o.alongX ? [0, 0, .5] : [.5, 0, 0]);   // a broken bar
+    } else for (const s of [-half + .05, half - .05]) { const [px, , pz] = along(s, 0); box(...sized(.1, 2.3, .34), [px, 1.15, pz], wood); }
+  }
+  box(1.4, .06, 2.1, [22.3, .06, z0 - 1.2], 0x5a4330, [.08, .25, 0]);                              // front door blown off, lying outside
+
+  // downstairs floor: dusty flagstones
+  for (let x = x0 + t; x < x1 - t - .01; x += .9) for (let z = z0 + t; z < z1 - t - .01; z += .9) {
+    const w = Math.min(.88, x1 - t - x), d = Math.min(.88, z1 - t - z);
+    box(w, .06, d, [x + w / 2, -.02, z + d / 2], col.set(0x6e665a).multiplyScalar(.85 + hash2(x * 3, z * 5) * .25).getHex());
+  }
+  // wide stairs up to the first floor
+  const steps = Math.round((STAIRS.x1 - STAIRS.x0) / .5), run = (STAIRS.x1 - STAIRS.x0) / steps;
+  for (let i = 0; i < steps; i++) {
+    const top = (i + 1) * floor / steps;
+    box(run, top, STAIRS.z1 - STAIRS.z0, [STAIRS.x1 - (i + .5) * run, top / 2, (STAIRS.z0 + STAIRS.z1) / 2], i % 2 ? 0x6c5c49 : 0x655542);
+    box(run, .04, STAIRS.z1 - STAIRS.z0 + .04, [STAIRS.x1 - (i + .5) * run, top + .02, (STAIRS.z0 + STAIRS.z1) / 2], 0x7a6852);   // worn tread
+  }
+  // upstairs floor: slab with floorboards on top, open above the stairs and missing where the corner fell in
+  for (let x = x0; x < x1 - .01; x += .5) for (let z = z0; z < z1 - .01; z += .5) {
+    const cx = x + .25, cz = z + .25;
+    if (inRect(cx, cz, STAIRWELL) || inRect(cx, cz, HOLE)) continue;
+    box(.5, .24, .5, [cx, floor - .15, cz], 0x8a8379);                                         // concrete underneath
+    const scorch = burnt(cx, floor, cz) * .9;
+    box(.5, .04, .5, [cx, floor - .02, cz], col.set(hash2(cx * 7, cz * 3) < .5 ? 0x7a6550 : 0x6f5a46).lerp(soot, scorch).getHex());
+  }
+  // the collapsed corner: slabs hanging into the hole, charred beams, and the pile they fell onto
+  box(1.3, .22, 1, [HOLE.x0 + .6, floor - .55, HOLE.z1 - .3], 0x8a8379, [-.7, .2, .15]);
+  box(1, .22, 1.3, [HOLE.x0 + .2, floor - .65, hz - .4], 0x7d766c, [.15, 0, .8]);
+  box(.14, .14, 2.8, [hx - .4, floor - .45, hz + .4], charred, [.45, .5, 0]);
+  box(.14, .14, 2.2, [hx + .6, floor - .2, HOLE.z1 - .5], charred, [-.3, -.4, .2]);
+  box(.12, .12, 1.8, [HOLE.x0 + .3, floor + .1, HOLE.z0 + .7], charred, [0, .9, .25]);
+  const rubble = (cx, cz, r, h, n, base = 0) => {
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * 6.3, d = Math.sqrt(Math.random()) * r, s = rand(.08, .3);
+      const x = cx + Math.cos(a) * d, z = cz + Math.sin(a) * d, y = base + h * (1 - (d / r) ** 2) * rand(.5, 1);
+      const c = Math.random() < .55 ? brick[i % 3] : Math.random() < .6 ? plaster[i % 3] : 0x8a8379;
+      P.push({ geo: lumpy(new THREE.DodecahedronGeometry(1, 0), .5), at: [x, y, z], scale: [s * rand(1, 1.6), s * rand(.5, .9), s * rand(1, 1.4)], rot: [rand(0, 3), rand(0, 6), rand(0, 3)], color: col.set(c).lerp(soot, rand(0, .35)).getHex() });
+    }
+  };
+  rubble(hx, hz, 1.6, 1, 90);                        // under the collapsed corner
+  rubble(x1 + 1, 5.4, 1.9, .8, 70);                  // blown out through the side wall
+  rubble(x1 - 1, 5.4, 1.3, .5, 35);
+  rubble(x1 + .6, 1.5, 1, .4, 22);
+  rubble(x0 - .6, 7.5, 1, .35, 20);
+  rubble(24, 4, 1.8, .05, 25, floor);                // bits of broken wall lying upstairs
+  rubble(29, 7, 1.6, .05, 25, floor);
+  rubble(22.5, 3.5, 1.4, .05, 15);                   // and downstairs
+  houseMesh = mergedMesh(P);
+})();
 // Grass: thousands of little tufts drawn in one go, swaying gently in the wind
 const windTime = { value: 0 };
 (function makeGrass() {
@@ -380,7 +544,7 @@ const windTime = { value: 0 };
     const x = rand(-98, 98), z = rand(-73, 73);
     if (fbm(x * .09, z * .09) < rand(.25, .7)) continue;        // grows in patches
     if (wallGap(x, z) < .5 || track(x, z) > rand(.3, 1)) continue;
-    if (craters.some(c => Math.hypot(x - c.x, z - c.z) < c.r * .8)) continue;
+    if (craters.some(c => Math.hypot(x - c.x, z - c.z) < c.r * .8) || inRect(x, z, HOUSE, .2)) continue;
     const s = rand(.7, 1.5);
     q.setFromAxisAngle(up, rand(0, 6.3));
     grass.setMatrixAt(n, m.compose(new THREE.Vector3(x, groundY(x, z), z), q, new THREE.Vector3(s, s * rand(.7, 1.3), s)));
@@ -399,7 +563,7 @@ const windTime = { value: 0 };
   let f = 0;
   for (let tries = 0; f < FLOWERS && tries < FLOWERS * 10; tries++) {
     const x = rand(-98, 98), z = rand(-73, 73);
-    if (fbm(x * .09, z * .09) < .5 || wallGap(x, z) < 1 || track(x, z) > .2) continue;
+    if (fbm(x * .09, z * .09) < .5 || wallGap(x, z) < 1 || track(x, z) > .2 || inRect(x, z, HOUSE, 1)) continue;
     if (craters.some(c => Math.hypot(x - c.x, z - c.z) < c.r * 1.3)) continue;
     flowers.setMatrixAt(f, m.compose(new THREE.Vector3(x, groundY(x, z) + rand(.25, .45), z), q, new THREE.Vector3(1, .6, 1)));
     flowers.setColorAt(f, col.set(pick(petals)));
@@ -504,6 +668,7 @@ const KITS = {
   german:   { tunic: 0x5c5f4e, trousers: 0x55584a, web: 0x1f1c19, helmet: 0x4d5048, boots: 0x161412 },
 };
 const SKIN = 0xd6a986;
+const HEAD_SIZE = 1.15;       // how big heads are (1 = the original size)
 
 // shape helpers (all sizes in metres-ish; the soldier stands 1.95 tall before scaling)
 const vec = (x, y, z) => new THREE.Vector3(x, y, z);
@@ -696,7 +861,9 @@ function muddy(geo, amount) {        // dirt that builds up towards the ground, 
 function soldierGeometry(kind) {     // built once per army, then shared by every soldier of that army
   const k = KITS[kind], german = kind === "german", us = kind === "american";
   const strapFabric = german ? LEATHER : CANVAS;
-  const T = [], add = (geo, color, at = [0, 0, 0], rot, scale, fabric = 0) => T.push({ geo, color, at, rot, scale, fabric });
+  const T = [];
+  let into = T;                                                         // which list add() puts parts in
+  const add = (geo, color, at = [0, 0, 0], rot, scale, fabric = 0) => into.push({ geo, color, at, rot, scale, fabric });
   const strap = (a, b, color, r = .013, fabric = strapFabric) => add(limbGeo(a, b, r, r, 6), color, [0, 0, 0], undefined, undefined, fabric);
   const round = (geo, sx, sz) => geo.scale(sx, 1, sz);          // squash a round shape into a body shape
   const button = (at, color = german ? 0x6f7268 : us ? 0x4a3626 : 0x5a4a32) => add(ball(.0085, .0085, .004, 10), color, at);
@@ -715,7 +882,9 @@ function soldierGeometry(kind) {     // built once per army, then shared by ever
   add(new THREE.CylinderGeometry(.084, .092, .055, 24, 1, true), german ? 0x2f3a2e : k.tunic, [0, 1.595, 0], undefined, undefined, WOOL);   // collar
   if (german) [-1, 1].forEach(s => add(roundBox(.03, .022, .006, .003), 0x8f9187, [s * .042, 1.597, .078], [0, s * .5, 0]));   // collar tabs
 
-  // head: neck, the sculpted face, eyes with lids, ears
+  // head: neck, the sculpted face, eyes with lids, ears, helmet (built on its own so it can be sized)
+  const headParts = [];
+  into = headParts;
   add(new THREE.CylinderGeometry(.058, .066, .14, 16), SKIN, [0, 1.63, 0]);
   add(headGeometry(), SKIN, [0, HEAD.y, 0]);
   const iris = { british: 0x56697a, american: 0x5b4128, german: 0x587d8f }[kind];
@@ -737,6 +906,11 @@ function soldierGeometry(kind) {     // built once per army, then shared by ever
   } else if (us) {                                                                          // straps left hanging, as GIs wore them
     strap([-.14, 1.79, .01], [-.12, 1.66, .05], k.web, .006); strap([.14, 1.79, .01], [.12, 1.66, .05], k.web, .006);
   }
+
+  // grow the whole head from the base of the neck, so it suits the broad shoulders and kit
+  const neckBase = 1.57;
+  T.push({ geo: mergeParts(headParts, 0, true).translate(0, -neckBase, 0).scale(HEAD_SIZE, HEAD_SIZE, HEAD_SIZE).translate(0, neckBase - .02, 0), color: SKIN, at: [0, 0, 0] });
+  into = T;
 
   // arms holding the rifle: creased sleeves that gather at the elbow, a cuff, a fist with a thumb
   const arm = (shoulder, elbow, wrist, hand, seed) => {
@@ -896,13 +1070,14 @@ function updateHealthBar(p) {
   fill.scale.x = .84 * f;
   fill.center.x = .5 / f;                             // keeps the bar's left end fixed as it shrinks
   fill.material.color.set(hpColor(f));
+  back.position.y = fill.position.y = 2.2 - (p.crouchAmt || 0) * .28;   // stays just above the head when crouching
 }
 
 function makePlayer(num) {
   const s = buildSoldier(num === 1 ? "british" : "american");
   return {
-    num, x: num === 1 ? -10 : 10, z: 0, yaw: 0, r: .5, hp: MAX_HP, ammo: MAG_SIZE, reload: 0, cool: 0,
-    alive: true, vx: 0, vz: 0, jumpY: 0, vy: 0, land: 0, walk: 0, gait: 0, kick: 0, ...s, bar: makeHealthBar(s.group),
+    num, x: num === 1 ? -10 : 10, z: 0, y: groundY(num === 1 ? -10 : 10, 0), yaw: 0, r: .5, hp: MAX_HP, ammo: MAG_SIZE, reload: 0, cool: 0,
+    alive: true, pitch: 0, vx: 0, vz: 0, jumpY: 0, vy: 0, land: 0, sinceHit: 0, healing: false, crouched: false, crouchAmt: 0, walk: 0, gait: 0, kick: 0, ...s, bar: makeHealthBar(s.group),
     cam: new THREE.PerspectiveCamera(65, 1, .1, 200),
   };
 }
@@ -915,7 +1090,7 @@ function makeEnemy() {
   } while (blocked(x, z, .6));
   const s = buildSoldier("german");
   const maxHp = 40 + wave * 4;
-  return { x, z, yaw: 0, r: .5, hp: maxHp, cool: rand(60, 140), strafe: Math.random() < .5 ? 1 : -1,
+  return { x, z, y: groundY(x, z), vy: 0, jumpY: 0, yaw: 0, r: .5, hp: maxHp, cool: rand(60, 140), strafe: Math.random() < .5 ? 1 : -1,
     vx: 0, vz: 0, pause: 0, walk: rand(0, 6), gait: 0, kick: 0, flash: 0, ...s };
 }
 
@@ -962,7 +1137,7 @@ function nextWave() {
   spawnTimer = 0;
   waveTimer = 120;
   for (const p of players) {            // fallen soldiers come back, everyone patches up
-    if (!p.alive) { p.alive = true; p.hp = MAX_HP / 2; p.group.rotation.x = 0; p.group.position.y = 0; p.vx = p.vz = 0; p.jumpY = p.vy = 0; }
+    if (!p.alive) { p.alive = true; p.hp = MAX_HP / 2; p.group.rotation.x = 0; p.group.position.y = 0; p.vx = p.vz = 0; p.jumpY = p.vy = 0; p.y = supportY(p.x, p.z, 99); p.sinceHit = 0; p.crouched = false; }
     else p.hp = Math.min(MAX_HP, p.hp + MAX_HP / 4);
   }
 }
@@ -1028,22 +1203,55 @@ function muzzleFlash(pos, yaw) {
   }
 }
 
-function shoot(from, yaw, team, spread) {
+function stepHeight(s, jump) {        // stairs, the upstairs floor, jumping and falling off edges
+  const support = supportY(s.x, s.z, s.y);
+  const grounded = s.vy <= 0 && s.y <= support + .35;
+  if (jump && grounded) { s.vy = JUMP_POWER; s.land = 0; }
+  if (s.vy > 0 || s.y > support + .35) {                  // in the air
+    s.y += s.vy; s.vy -= GRAVITY;
+    if (s.y <= support) { s.land = Math.min(1, -s.vy / JUMP_POWER); s.y = support; s.vy = 0; }   // touch down: bend the knees
+  } else {                                                // on the ground, the stairs or the floor
+    if (s.vy < -.03) s.land = Math.min(1, -s.vy / JUMP_POWER);
+    s.y = support; s.vy = 0;
+  }
+  s.jumpY = s.y - support;
+}
+
+// target: who an enemy is aiming at. Players can't aim up or down, so their shots tilt
+// towards the nearest enemy roughly in front (that is how you hit people below from upstairs)
+function shoot(from, yaw, team, spread, target) {
   const a = yaw + rand(-spread, spread), f = forward(a);
   from.kick = 1;                                         // rifle recoil, shown in poseSoldier
   from.eject = 16;                                       // the empty case flies out as the bolt is worked
+  if (!target) {
+    let best = .22;
+    for (const e of enemies) {
+      const off = Math.abs(Math.atan2(Math.sin(Math.atan2(e.x - from.x, e.z - from.z) - yaw), Math.cos(Math.atan2(e.x - from.x, e.z - from.z) - yaw)));
+      if (off < best && dist(from, e) < 45) { best = off; target = e; }
+    }
+  }
+  const h0 = (from.y || 0) + 1.5, reach = target ? Math.max(1, dist(from, target)) : 30;
+  const h1 = target ? (target.y || 0) + 1.25 : h0 + ((from.y || 0) + 1.3 - (from.pitch || 0) * 9 - h0) / 10 * reach;
+  const lift = Math.max(from.y || 0, team === "enemy" && target ? target.y || 0 : 0);
   const mesh = new THREE.Mesh(bulletGeo, team === "ally" ? allyTracer : enemyTracer);
-  mesh.rotation.y = a; scene.add(mesh);
-  bullets.push({ x: from.x + f.x * 1.2, z: from.z + f.z * 1.2, vx: f.x * BULLET_SPEED, vz: f.z * BULLET_SPEED, team, life: 60, mesh });
-  from.group.position.x = from.x; from.group.position.z = from.z; from.group.rotation.y = from.yaw;   // bring the model up to date
+  mesh.rotation.order = "YXZ"; mesh.rotation.set(-Math.atan2(h1 - h0, reach), a, 0); scene.add(mesh);
+  bullets.push({ x: from.x + f.x * 1.2, z: from.z + f.z * 1.2, y: h0, h0, h1, reach, trav: 1.2, lift,
+    vx: f.x * BULLET_SPEED, vz: f.z * BULLET_SPEED, team, life: 60, mesh });
+  mesh.position.set(from.x + f.x * 1.2, h0, from.z + f.z * 1.2);
+  from.group.position.set(from.x, from.y || 0, from.z); from.group.rotation.y = from.yaw;   // bring the model up to date
   muzzleFlash(from.muzzle.getWorldPosition(muzzlePos), a);
 }
 
+const lookUpDown = (p, amount) => { p.pitch = Math.max(-.45, Math.min(.55, p.pitch + amount)); };   // + looks down, - looks up
 function updatePlayer(p) {
   if (!p.alive) return;
   let fwd = 0, side = 0, turn = 0;
   const sprint = p.num === 1 ? keys.ShiftLeft : keys.ControlRight;
   const jumpKey = p.num === 1 ? keys.KeyJ : keys.Slash;
+  const crouchKey = p.num === 1 ? keys.KeyC : keys.Period;
+  if (crouchKey && !p.crouchHeld) p.crouched = !p.crouched;   // tap to crouch, tap again to stand
+  p.crouchHeld = crouchKey;
+  if (jumpKey && !p.jumpHeld) p.crouched = false;               // jumping stands you up
   if (!twoPlayer) {
     fwd = (keys.KeyW ? 1 : 0) - (keys.KeyS ? 1 : 0);
     side = (keys.KeyD ? 1 : 0) - (keys.KeyA ? 1 : 0);
@@ -1056,23 +1264,27 @@ function updatePlayer(p) {
     turn = (keys.ArrowLeft ? 1 : 0) - (keys.ArrowRight ? 1 : 0);
   }
   p.yaw += turn * TURN_SPEED;
+  if (!twoPlayer) lookUpDown(p, ((keys.ArrowDown ? 1 : 0) - (keys.ArrowUp ? 1 : 0)) * TURN_SPEED * .6);   // arrow keys look up and down too
   let tx = 0, tz = 0;                                    // the speed we want to reach
   if (fwd || side) {
     const f = forward(p.yaw), r = rightOf(p.yaw), len = Math.hypot(fwd, side);
-    const speed = sprint && fwd > 0 ? SPRINT_SPEED : fwd < 0 ? PLAYER_SPEED * .7 : PLAYER_SPEED;
+    if (sprint && fwd > 0) p.crouched = false;                  // sprinting stands you up
+    const speed = p.crouched ? PLAYER_SPEED * CROUCH_SPEED * (fwd < 0 ? .7 : 1)
+      : sprint && fwd > 0 ? SPRINT_SPEED : fwd < 0 ? PLAYER_SPEED * .7 : PLAYER_SPEED;
     tx = (f.x * fwd + r.x * side) / len * speed;
     tz = (f.z * fwd + r.z * side) / len * speed;
   }
-  const inAir = p.jumpY > 0 || p.vy > 0;
+  const inAir = p.jumpY > .35 || p.vy > 0;
   steer(p, tx, tz, inAir ? AGILITY * .12 : AGILITY);   // in the air you mostly keep the speed you jumped with
 
   // jumping: press the key while standing on the ground (let go and press again for the next jump)
-  if (jumpKey && !p.jumpHeld && !inAir) { p.vy = JUMP_POWER; p.land = 0; }
+  stepHeight(p, jumpKey && !p.jumpHeld);
   p.jumpHeld = jumpKey;
-  if (p.vy !== 0 || p.jumpY > 0) {
-    p.jumpY += p.vy; p.vy -= GRAVITY;
-    if (p.jumpY <= 0) { p.land = Math.min(1, -p.vy / JUMP_POWER); p.jumpY = 0; p.vy = 0; }   // touch down: bend the knees
-  }
+
+  // recovering: after a few seconds without being hit, health slowly comes back
+  p.sinceHit++;
+  p.healing = p.sinceHit > REGEN_DELAY && p.hp < MAX_HP;
+  if (p.healing) p.hp = Math.min(MAX_HP, p.hp + REGEN_RATE);
 
   if (p.cool > 0) p.cool--;
   if (p.reload > 0) { if (--p.reload === 0) p.ammo = MAG_SIZE; return; }
@@ -1103,8 +1315,11 @@ function updateEnemy(e) {
     if (Math.random() < .012) e.strafe *= -1;
     if (Math.random() < .006) e.pause = rand(20, 50);
   }
+  stepHeight(e, false);
   if (--e.cool <= 0 && d < 36 && sees && Math.abs(diff) < .3) {
-    shoot(e, e.yaw, "enemy", .07);
+    // harder to hit you from far away, and harder still while you are on the move
+    const moving = Math.min(1, Math.hypot(t.vx, t.vz) / PLAYER_SPEED);
+    shoot(e, e.yaw, "enemy", .03 + d * .004 + moving * .05 + (t.crouched ? .03 : 0), t);   // crouching makes you a smaller target
     e.cool = rand(70, 130) - Math.min(wave * 4, 40);
   }
 }
@@ -1120,16 +1335,20 @@ function update() {
   if (spawnQueue > 0 && --spawnTimer <= 0) { enemies.push(makeEnemy()); spawnQueue--; spawnTimer = 50; }
 
   for (const b of bullets) {
-    b.x += b.vx; b.z += b.vz; b.life--;
+    b.x += b.vx; b.z += b.vz; b.life--; b.trav += BULLET_SPEED;
+    b.y = b.h0 + (b.h1 - b.h0) * b.trav / b.reach;      // a straight line from the muzzle towards the target
+    b.mesh.position.set(b.x, b.y, b.z);
     if (b.x < MINX || b.x > MAXX || b.z < MINZ || b.z > MAXZ) b.life = 0;
-    if (insideWall(b.x, b.z)) { b.life = 0; addPuff(b.x, 1, b.z, 0xd6c9a0, 18, .06); }   // dust off the sandbags
+    if (wallStopsShot(b.x, b.z, b.lift)) { b.life = 0; addPuff(b.x, Math.min(b.y, 2.5), b.z, 0xd6c9a0, 18, .06); }   // dust off the wall
+    else if (b.y < groundY(b.x, b.z)) { b.life = 0; addPuff(b.x, groundY(b.x, b.z) + .1, b.z, 0x9a8a6a, 14, .05); }  // kicks up dirt
     const victims = b.team === "ally" ? enemies : players.filter(p => p.alive);
     for (const v of victims) {
-      if (b.life > 0 && dist(b, v) < .6) {
+      if (b.life > 0 && dist(b, v) < .6 && b.y > (v.y || 0) - .2 && b.y < (v.y || 0) + 2.3) {
         b.life = 0;
         v.hp -= b.team === "ally" ? 20 : 12;
+        v.sinceHit = 0;                                    // getting hit stops recovery for a while
         if (v.uni && b.team === "ally") { v.uni.emissive.setHex(0x777777); v.flash = 6; }
-        addPuff(b.x, 1.2, b.z, 0xd0c4a4, 10, .04);
+        addPuff(b.x, b.y, b.z, 0xd0c4a4, 10, .04);
       }
     }
   }
@@ -1175,7 +1394,7 @@ function update() {
 
 // ---------- 6) DRAWING ----------
 function poseSoldier(s, down) {
-  s.group.position.set(s.x, groundY(s.x, s.z) + (s.jumpY || 0), s.z);  // stand on the bumpy ground (or jump off it)
+  s.group.position.set(s.x, s.y ?? groundY(s.x, s.z), s.z);           // feet on the ground, the stairs or the floor (or in the air)
   s.group.rotation.y = s.yaw;
   if (down) s.group.rotation.x = Math.max(s.group.rotation.x - .08, -Math.PI / 2);
 }
@@ -1211,6 +1430,13 @@ function animateSoldier(s, down) {   // runs once per game step, so it looks the
   // jumping: tuck the legs up in the air, then bend the knees to soak up the landing
   s.air = (s.air || 0) + ((s.jumpY > 0 ? 1 : 0) - (s.air || 0)) * .35;
   s.land = (s.land || 0) * .82;
+  // crouching: thighs forward, knees deeply bent, body low, leaning slightly forward
+  s.crouchAmt = (s.crouchAmt || 0) + ((s.crouched ? 1 : 0) - (s.crouchAmt || 0)) * .18;
+  const c = s.crouchAmt;
+  if (c > .005) for (let i = 0; i < 2; i++) {
+    s.hips[i].rotation.x = s.hips[i].rotation.x * (1 - .4 * c) - (i ? 1.05 : .9) * c;
+    s.knees[i].rotation.x = s.knees[i].rotation.x * (1 - .4 * c) + (i ? 1.75 : 1.6) * c;
+  }
   const bend = Math.max(s.air, s.land * .8);
   if (bend > .01) for (let i = 0; i < 2; i++) {
     const lead = i ? .25 : -.1;                          // one leg a little ahead of the other
@@ -1218,20 +1444,27 @@ function animateSoldier(s, down) {   // runs once per game step, so it looks the
     s.knees[i].rotation.x = s.knees[i].rotation.x * (1 - bend) + (1.15 + lead) * bend;
   }
   // body dips as the legs spread, and rolls a little into sideways steps
-  s.body.position.y = (-Math.abs(Math.sin(s.walk)) * .05 * Math.min(1, g * 4) - g * .04) * (1 - s.air) - s.land * .1;
+  s.body.position.y = (-Math.abs(Math.sin(s.walk)) * .05 * Math.min(1, g * 4) - g * .04) * (1 - s.air) - s.land * .1 - c * .31;
   s.body.rotation.z = across / SPRINT_SPEED * .12;
   // upper body: lean into the run, small sway with the steps, breathing, recoil
-  s.upper.rotation.x = Math.max(-.1, ahead / SPRINT_SPEED * .22) + Math.sin(s.breath) * .012 * (1 - g) - s.kick * .12;
+  s.upper.rotation.x = Math.max(-.1, ahead / SPRINT_SPEED * .22) + Math.sin(s.breath) * .012 * (1 - g) - s.kick * .12 + c * .12;
   s.upper.rotation.y = Math.sin(s.walk) * .07 * g;
   s.upper.position.z = -s.kick * .05;
 }
+const camRay = new THREE.Raycaster(), camHead = new THREE.Vector3(), camWant = new THREE.Vector3();
 function placeCamera(p) {
   const f = forward(p.yaw), r = rightOf(p.yaw);
-  const gy = groundY(p.x, p.z);
-  const want = gy + (p.jumpY || 0) * .15;             // follow the ground smoothly; barely rise with a jump, so you see it
+  const floorY = (p.y ?? groundY(p.x, p.z)) - (p.jumpY || 0);
+  const want = floorY + (p.jumpY || 0) * .15 - (p.crouchAmt || 0) * .55;   // follow the floor; barely rise with a jump; drop with a crouch
   p.camY = p.camY === undefined ? want : p.camY + (want - p.camY) * .15;
-  p.cam.position.set(p.x - f.x * 5.2 + r.x * 1.0, 3.0 + p.camY, p.z - f.z * 5.2 + r.z * 1.0);
-  p.cam.lookAt(p.x + f.x * 10, 1.3 + p.camY, p.z + f.z * 10);
+  camHead.set(p.x, p.camY + 1.6, p.z);
+  const pitch = p.pitch || 0;                        // looking down lifts the camera, looking up lowers it
+  camWant.set(p.x - f.x * 5.2 + r.x * 1.0, 3.0 + p.camY + pitch * 2.6, p.z - f.z * 5.2 + r.z * 1.0);
+  const gap = camWant.distanceTo(camHead);
+  camRay.set(camHead, camWant.clone().sub(camHead).normalize()); camRay.far = gap;
+  const hit = camRay.intersectObject(houseMesh)[0];   // a wall or the ceiling in the way: come in closer
+  p.cam.position.copy(hit ? camHead.clone().addScaledVector(camRay.ray.direction, Math.max(.3, hit.distance - .3)) : camWant);
+  p.cam.lookAt(p.x + f.x * 10, 1.3 + p.camY - pitch * 9, p.z + f.z * 10);
 }
 const menuCam = new THREE.PerspectiveCamera(55, 1, .1, 300);
 let menuAngle = 0;
@@ -1265,10 +1498,11 @@ function render() {
 function updateHUD() {
   if (state === "menu") return;
   players.forEach(p => {
-    document.getElementById("name" + p.num).textContent = `SOLDIER ${p.num}${p.alive ? "" : " · DOWN"}`;
+    document.getElementById("name" + p.num).textContent = `SOLDIER ${p.num}${!p.alive ? " · DOWN" : p.crouched ? " · CROUCHED" : ""}`;
     const bar = document.getElementById("hp" + p.num);
     bar.style.width = p.hp / MAX_HP * 100 + "%";
     bar.style.backgroundColor = hpColor(p.hp / MAX_HP);
+    bar.parentElement.classList.toggle("healing", p.healing);   // the bar glows while health is coming back
     document.getElementById("hptext" + p.num).textContent = `${Math.ceil(p.hp)} / ${MAX_HP}`;
     document.getElementById("ammo" + p.num).textContent = p.reload ? "RELOADING..." : "AMMO " + "▮".repeat(p.ammo) + "▯".repeat(MAG_SIZE - p.ammo);
   });
@@ -1318,7 +1552,10 @@ stage.addEventListener("mousedown", e => {
 });
 window.addEventListener("mouseup", () => { mouse.down = false; });
 document.addEventListener("mousemove", e => {
-  if (document.pointerLockElement === canvas && players[0] && !paused) players[0].yaw -= e.movementX * MOUSE_SENSITIVITY;
+  if (document.pointerLockElement === canvas && players[0] && !paused) {
+    players[0].yaw -= e.movementX * MOUSE_SENSITIVITY;
+    lookUpDown(players[0], e.movementY * MOUSE_SENSITIVITY * (INVERT_LOOK ? -1 : 1));
+  }
 });
 
 document.getElementById("btn1").onclick = () => startGame(1);

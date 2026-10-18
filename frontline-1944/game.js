@@ -235,27 +235,35 @@ function lumpy(geo, amount) {        // dent a round shape so it looks like foli
   }
   return geo;
 }
-function mergedMesh(parts) {         // parts: { geo, at: [x,y,z], rot: [x,y,z], scale: [x,y,z], color }
-  const pos = [], cols = [], m = new THREE.Matrix4(), q = new THREE.Quaternion(), c = new THREE.Color();
+function mergedMesh(parts) {
+  const mesh = new THREE.Mesh(mergeParts(parts), new THREE.MeshPhongMaterial({ vertexColors: true, flatShading: true, shininess: 0, specular: 0 }));
+  mesh.castShadow = mesh.receiveShadow = true;
+  scene.add(mesh);
+  return mesh;
+}
+// parts: { geo, at: [x,y,z], rot: [x,y,z], scale: [x,y,z], color }. smooth = keep the rounded shading of each part
+function mergeParts(parts, dapple = .24, smooth = false) {
+  const pos = [], cols = [], nors = [], fabs = [], m = new THREE.Matrix4(), q = new THREE.Quaternion(), c = new THREE.Color();
   for (const pt of parts) {
     const g = pt.geo.index ? pt.geo.toNonIndexed() : pt.geo.clone();
     q.setFromEuler(new THREE.Euler(...(pt.rot || [0, 0, 0])));
     g.applyMatrix4(m.compose(new THREE.Vector3(...pt.at), q, new THREE.Vector3(...(pt.scale || [1, 1, 1]))));
-    const p = g.attributes.position.array;
+    const p = g.attributes.position.array, n = g.attributes.normal.array, own = g.attributes.color;   // own = colours painted on the shape
     for (let i = 0; i < p.length; i += 3) {
       pos.push(p[i], p[i + 1], p[i + 2]);
-      c.set(pt.color).multiplyScalar(.88 + hash2(p[i] * 3.1, p[i + 2] * 2.7 + p[i + 1]) * .24);   // dappled colour
+      nors.push(n[i], n[i + 1], n[i + 2]);
+      fabs.push(pt.fabric || 0);
+      (own ? c.fromArray(own.array, i) : c.set(pt.color)).multiplyScalar(1 - dapple / 2 + hash2(p[i] * 3.1, p[i + 2] * 2.7 + p[i + 1]) * dapple);   // dappled colour
       cols.push(c.r, c.g, c.b);
     }
   }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
   geo.setAttribute("color", new THREE.Float32BufferAttribute(cols, 3));
-  geo.computeVertexNormals();
-  const mesh = new THREE.Mesh(geo, new THREE.MeshPhongMaterial({ vertexColors: true, flatShading: true, shininess: 0, specular: 0 }));
-  mesh.castShadow = mesh.receiveShadow = true;
-  scene.add(mesh);
-  return mesh;
+  geo.setAttribute("fabric", new THREE.Float32BufferAttribute(fabs, 1));   // which cloth pattern to draw (soldiers only)
+  if (smooth) geo.setAttribute("normal", new THREE.Float32BufferAttribute(nors, 3));
+  else geo.computeVertexNormals();
+  return geo;
 }
 const pick = list => list[Math.floor(Math.random() * list.length)];
 const outsideFence = (x, z, gap) => Math.abs(x) > MAXX + gap || Math.abs(z) > MAXZ + gap;
@@ -400,88 +408,474 @@ const windTime = { value: 0 };
   scene.add(flowers);
 })();
 
-// ---------- 4) THE SOLDIERS (built from simple boxes and spheres) ----------
-function buildSoldier(uniformColor, helmetColor, enemy) {
+// ---------- RIFLES: bolt-action rifles built from many small parts, glued into one mesh ----------
+// Laid out along +z: the butt is at z = 0 and the muzzle at z = 1.2; y = 0 is the line of the barrel.
+function sideProfile(points, width) {    // a flat side-view outline given some thickness (used for wooden stocks)
+  const shape = new THREE.Shape(points.map(([z, y]) => new THREE.Vector2(z, y)));
+  const geo = new THREE.ExtrudeGeometry(shape, { depth: width, bevelEnabled: true, bevelThickness: .005, bevelSize: .005, bevelSegments: 1 });
+  return geo.rotateY(-Math.PI / 2).translate(width / 2, 0, 0);
+}
+function rifleGeometry(kind) {           // "british" Lee-Enfield, "american" M1 Garand, "german" Kar98k
+  const german = kind === "german", us = kind === "american";
+  const wood = german ? 0x6a3c20 : us ? 0x82522d : 0x7d5631, guard = german ? 0x5e341d : us ? 0x744828 : 0x6c4a2a;
+  const steel = 0x2a2b2d, worn = 0x45464a, strap = german ? 0x3b3428 : us ? 0x8b7e57 : 0x8a7f55;
+  const box = (w, h, d) => new THREE.BoxGeometry(w, h, d);
+  const tube = (r, len, seg = 10) => new THREE.CylinderGeometry(r, r, len, seg).rotateX(Math.PI / 2);   // lies along the barrel
+  const P = [];
+  // wooden butt and wrist, shaped like a real stock from the side
+  P.push({ geo: sideProfile([[0, .025], [.26, .008], [.33, 0], [.39, -.012], [.39, -.05], [.33, -.056], [.27, -.072], [0, -.16]], .048), at: [0, 0, 0], color: wood });
+  P.push({ geo: box(.054, .19, .012), at: [0, -.068, .004], rot: [-.03, 0, 0], color: german || us ? steel : worn });   // butt plate
+  // steel receiver with the bolt
+  P.push({ geo: box(.042, .052, .15), at: [0, -.006, .465], color: worn });
+  P.push({ geo: tube(.016, .2), at: [0, .02, .45], color: steel });
+  if (us) {                                         // the Garand is semi-automatic: an operating rod handle instead of a bolt handle
+    P.push({ geo: box(.02, .022, .05), at: [.03, .004, .53], color: steel });
+    P.push({ geo: box(.03, .016, .016), at: [.045, .004, .55], color: steel });
+  } else {
+    P.push({ geo: new THREE.CylinderGeometry(.007, .007, .075, 6).rotateZ(german ? -2 : -1.45), at: [.036, german ? .004 : .02, .385], color: steel });
+    P.push({ geo: new THREE.SphereGeometry(.014, 8, 6), at: [.07, german ? -.012 : .025, .385], color: steel });   // bolt knob
+  }
+  // magazine, trigger guard and trigger
+  if (german || us) P.push({ geo: box(.04, .02, .1), at: [0, -.062, .47], color: steel });   // flush floor plate
+  else P.push({ geo: box(.036, .075, .085), at: [0, -.085, .475], color: steel });       // box magazine underneath
+  P.push({ geo: new THREE.TorusGeometry(.028, .005, 4, 10, Math.PI), at: [0, -.052, .4], rot: [0, Math.PI / 2, Math.PI], color: steel });
+  P.push({ geo: box(.006, .032, .008), at: [0, -.06, .395], rot: [-.3, 0, 0], color: steel });
+  // fore-end under the barrel, handguard on top
+  const foreEnd = german ? .93 : us ? .98 : 1.04;
+  P.push({ geo: sideProfile([[.5, -.008], [foreEnd, -.006], [foreEnd, -.038], [.62, -.046], [.52, -.052]], .042), at: [0, 0, 0], color: wood });
+  P.push({ geo: box(.034, .022, german ? .36 : us ? .43 : .52), at: [0, .019, german ? .74 : us ? .735 : .81], color: guard });
+  // barrel, bands, nose cap or gas cylinder, sights
+  P.push({ geo: tube(.013, .72), at: [0, .006, .84], color: steel });
+  P.push({ geo: tube(.016, .03), at: [0, .006, 1.185], color: steel });                // muzzle
+  for (const z of german ? [.72, .9] : us ? [.8] : [.75]) P.push({ geo: box(.05, .066, .024), at: [0, -.012, z], color: steel });   // barrel bands
+  if (german) P.push({ geo: box(.028, .022, .06), at: [0, -.028, .96], color: steel });  // bayonet lug
+  else if (us) P.push({ geo: tube(.021, .1), at: [0, .002, 1.13], color: steel });     // gas cylinder at the muzzle
+  else P.push({ geo: box(.048, .072, .07), at: [0, -.008, 1.04], color: steel });       // nose cap
+  P.push({ geo: box(.032, us ? .04 : .022, .032), at: [0, us ? .05 : .042, german ? .62 : us ? .39 : .43], color: steel });   // rear sight
+  const front = german ? 1.16 : us ? 1.15 : 1.05;
+  P.push({ geo: box(.006, .03, .012), at: [0, .034, front], color: steel });             // front sight blade
+  if (german) P.push({ geo: new THREE.CylinderGeometry(.02, .02, .035, 10, 1, true, -Math.PI / 2, Math.PI).rotateX(Math.PI / 2), at: [0, .034, front], color: steel });   // sight hood
+  else for (const x of [-.018, .018]) P.push({ geo: box(.006, .036, .03), at: [x, .036, front], color: steel });   // sight guards
+  // sling hanging under the rifle
+  const sling = new THREE.CatmullRomCurve3([new THREE.Vector3(0, -.14, .14), new THREE.Vector3(0, -.24, .45), new THREE.Vector3(0, -.06, .74)]);
+  P.push({ geo: new THREE.TubeGeometry(sling, 14, .008, 4), at: [0, 0, 0], scale: [3, 1, 1], color: strap });
+  return mergeParts(P, .12);
+}
+const rifleGeos = {};
+const rifleMat = new THREE.MeshPhongMaterial({ vertexColors: true, shininess: 18, specular: 0x222222 });
+
+// brass shell cases thrown out of the rifle after each shot
+let casings = [];
+const casingGeo = new THREE.CylinderGeometry(.011, .011, .065, 8);
+const casingMat = new THREE.MeshPhongMaterial({ color: 0xc9a043, shininess: 80, specular: 0x887744 });
+const casingVel = new THREE.Vector3();
+function ejectCasing(s) {
+  const mesh = new THREE.Mesh(casingGeo, casingMat);
+  s.ejectPort.getWorldPosition(mesh.position);
+  casingVel.set(rand(.03, .05), rand(.05, .08), rand(-.02, .01)).applyQuaternion(s.group.quaternion);   // out to the side and up
+  mesh.rotation.set(rand(0, 3), rand(0, 3), rand(0, 3));
+  scene.add(mesh);
+  casings.push({ mesh, vx: casingVel.x, vy: casingVel.y, vz: casingVel.z, spin: rand(.2, .5), life: 180 });
+  if (casings.length > 60) scene.remove(casings.shift().mesh);
+}
+function updateCasings() {
+  for (const c of casings) {
+    const m = c.mesh;
+    c.vy -= .006;                                        // gravity
+    m.position.x += c.vx; m.position.y += c.vy; m.position.z += c.vz;
+    m.rotation.x += c.spin; m.rotation.z += c.spin * .7;
+    const floor = groundY(m.position.x, m.position.z) + .012;
+    if (m.position.y < floor) {                          // bounce, then settle on its side
+      m.position.y = floor; c.vy = -c.vy * .35; c.vx *= .5; c.vz *= .5; c.spin *= .5;
+      if (Math.abs(c.vy) < .01) { c.vy = 0; c.spin = 0; m.rotation.x = Math.PI / 2; }
+    }
+    if (--c.life <= 0) scene.remove(m);
+  }
+  casings = casings.filter(c => c.life > 0);
+}
+
+// ---------- 4) THE SOLDIERS ----------
+// Three armies of 1944, each with its own uniform, helmet, kit and rifle.
+const KITS = {
+  british:  { tunic: 0x7b6b46, trousers: 0x726447, web: 0x8d8a5f, helmet: 0x59563a, boots: 0x1e1a16 },
+  american: { tunic: 0x857b59, trousers: 0x5f5a44, web: 0x8b7e57, helmet: 0x4b4f35, boots: 0x3d2c1d },
+  german:   { tunic: 0x5c5f4e, trousers: 0x55584a, web: 0x1f1c19, helmet: 0x4d5048, boots: 0x161412 },
+};
+const SKIN = 0xd6a986;
+
+// shape helpers (all sizes in metres-ish; the soldier stands 1.95 tall before scaling)
+const vec = (x, y, z) => new THREE.Vector3(x, y, z);
+const ball = (rx, ry, rz, seg = 16) => new THREE.SphereGeometry(1, seg, Math.round(seg * .75)).scale(rx, ry, rz);
+const lathe = (pts, seg = 22) => new THREE.LatheGeometry(pts.map(([r, y]) => new THREE.Vector2(r, y)), seg);
+function limbGeo(a, b, r1, r2, seg = 14) {   // a tapered tube running from point a to point b
+  const from = vec(...a), to = vec(...b);
+  const geo = new THREE.CylinderGeometry(r2, r1, from.distanceTo(to), seg);
+  geo.applyMatrix4(new THREE.Matrix4().makeRotationFromQuaternion(new THREE.Quaternion().setFromUnitVectors(vec(0, 1, 0), to.clone().sub(from).normalize())));
+  return geo.translate((from.x + to.x) / 2, (from.y + to.y) / 2, (from.z + to.z) / 2);
+}
+function helmetGeo(kind) {           // a side outline spun round, then the front lifted clear of the eyes
+  const outline = {
+    british:  [[0, .105], [.05, .1], [.09, .085], [.115, .06], [.128, .03], [.135, 0], [.15, -.008], [.2, -.02], [.235, -.028], [.24, -.022]],
+    american: [[0, .13], [.07, .122], [.11, .098], [.132, .06], [.142, .02], [.147, -.02], [.15, -.05], [.156, -.058]],
+    german:   [[0, .128], [.07, .12], [.108, .098], [.128, .065], [.135, .025], [.138, -.01], [.15, -.045], [.168, -.075], [.176, -.082]],
+  }[kind];
+  const geo = lathe(outline, 28);
+  if (kind !== "british") {          // M1 and M35 come down over the ears and neck but sit above the brow
+    const p = geo.attributes.position;
+    for (let i = 0; i < p.count; i++) {
+      const y = p.getY(i);
+      if (y < .04) p.setY(i, y + clamp01(p.getZ(i) / .15) * (kind === "german" ? .086 : .062) * clamp01((.04 - y) / .06));
+    }
+    geo.computeVertexNormals();
+  }
+  return geo;
+}
+
+// ---- the face: one smooth surface sculpted out of a ball, so there are no seams ----
+const HEAD = { rx: .096, ry: .122, rz: .112, y: 1.785 };   // half-width, half-height, half-depth, height of its centre
+const gauss = (v, w) => Math.exp(-(v / w) * (v / w));      // a soft bump: 1 in the middle, fading to 0
+function sculptHead(x, y, z) {       // move a point on the plain ball to where a real head's surface would be
+  const front = Math.max(0, z / HEAD.rz);                   // 0 at the sides and back, 1 on the face
+  const low = clamp01((-y - .01) / .11);
+  x *= 1 - low * .32;                                       // narrower towards the jaw and chin
+  if (z < 0) z *= 1 - low * .35;                            // back of the skull curves in to the neck
+  z -= front ** 4 * .012;                                   // a face is flatter than a ball
+  for (const s of [-1, 1]) {
+    z -= .011 * gauss(x - s * .034, .016) * gauss(y - .008, .013) * front;   // eye sockets
+    z += .006 * gauss(x - s * .05, .02) * gauss(y + .018, .02) * front;      // cheekbones
+    z += .005 * gauss(x - s * .011, .006) * gauss(y + .04, .006) * front;    // nostrils
+  }
+  z += .007 * gauss(y - .03, .01) * gauss(x, .055) * front;                 // brow ridge
+  const t = clamp01((.02 - y) / .058);                                       // 0 at the bridge of the nose, 1 at the tip
+  z += (.006 + .022 * t * t) * (y > -.042 ? 1 : gauss(y + .042, .007)) * gauss(x, .009 + .01 * t) * front;   // nose
+  z += .005 * gauss(y + .06, .006) * gauss(x, .022) * front;               // upper lip
+  z -= .003 * gauss(y + .067, .0025) * gauss(x, .024) * front;             // the line between the lips
+  z += .006 * gauss(y + .074, .007) * gauss(x, .02) * front;               // lower lip
+  z += .01 * gauss(y + .1, .018) * gauss(x, .03) * front;                   // chin
+  return [x, y, z];
+}
+function facePoint(x, y) {           // where the face's surface is, seen from the front at (x, y)
+  return sculptHead(x, y, HEAD.rz * Math.sqrt(Math.max(0, 1 - (x / HEAD.rx) ** 2 - (y / HEAD.ry) ** 2)));
+}
+function eyelid(start, length, lashes) {   // a thin shell of skin over part of the eye
+  const geo = new THREE.SphereGeometry(1, 18, 8, 0, Math.PI * 2, start, length);
+  const p = geo.attributes.position, cols = [], c = new THREE.Color();
+  for (let i = 0; i < p.count; i++) {
+    const edge = lashes ? clamp01((Math.acos(p.getY(i)) - (start + length - .22)) / .22) : 0;   // darker along the lash line
+    c.set(SKIN).lerp(new THREE.Color(0x2e221a), edge * .9);
+    cols.push(c.r, c.g, c.b);
+  }
+  geo.setAttribute("color", new THREE.Float32BufferAttribute(cols, 3));
+  return geo.scale(.0142, .0098, .0122);
+}
+function headGeometry() {
+  const geo = new THREE.SphereGeometry(1, 96, 72);
+  const p = geo.attributes.position, cols = [], c = new THREE.Color();
+  const hair = new THREE.Color(0x3b2a1d), lips = new THREE.Color(0xbc7c6c), flush = new THREE.Color(0xd08a76), socket = new THREE.Color(0xa67a64);
+  const stubble = new THREE.Color(0x9a7b66), brows = new THREE.Color(0x35261b);
+  for (let i = 0; i < p.count; i++) {
+    const x = p.getX(i) * HEAD.rx, y = p.getY(i) * HEAD.ry, z = p.getZ(i) * HEAD.rz;
+    p.setXYZ(i, ...sculptHead(x, y, z));
+    // colour, worked out from where the point sits on the plain ball
+    const front = Math.max(0, z / HEAD.rz), a = Math.abs(Math.atan2(x, z));   // a: 0 = straight ahead, PI = the back
+    c.set(SKIN);
+    let s = 0;
+    for (const side of [-1, 1]) s += gauss(x - side * .05, .022) * gauss(y + .025, .02);
+    c.lerp(flush, s * .35 * front + gauss(x, .012) * gauss(y + .035, .015) * .25 * front);       // cheeks and nose tip
+    if (y < -.045) c.lerp(stubble, clamp01((-.045 - y) / .02) * .22 * clamp01(front * 2));       // a day's stubble
+    c.lerp(lips, gauss(y + .067, .008) * gauss(x, .02) * front * .6);
+    for (const side of [-1, 1]) c.lerp(socket, gauss(x - side * .034, .02) * gauss(y - .006, .016) * front * .3);   // soft shadow round the eyes
+    for (const side of [-1, 1]) {                                                                 // eyebrows
+      const bx = x - side * .036;
+      c.lerp(brows, gauss(y - .029 + bx * bx * 6, .0045) * gauss(bx, .017) * front * .9);
+    }
+    // short army haircut: high at the forehead, down to the sideburns and the nape
+    const hairline = a < .6 ? .07 : a < .95 ? .07 - (a - .6) * .07 : a < 1.4 ? .045 - (a - .95) * .15
+      : a < 1.75 ? -.022 + (a - 1.4) * .06 : -.001 - Math.min(1, (a - 1.75) / .7) * .06;
+    if (y > hairline) c.lerp(hair, clamp01((y - hairline) / .01) * .85);
+    cols.push(c.r, c.g, c.b);
+  }
+  geo.setAttribute("color", new THREE.Float32BufferAttribute(cols, 3));
+  geo.computeVertexNormals();
+  return geo;
+}
+
+// ---- clothing helpers: cloth that folds, rounded pockets and pouches ----
+const WOOL = 1, CANVAS = 2, LEATHER = 3;   // which fabric pattern the shader draws on a part
+function clothTube(a, b, r1, r2, { folds = .05, bunchA = 0, bunchB = 0, seed = 0 } = {}) {   // a sleeve or trouser leg with creases
+  const from = vec(...a), to = vec(...b), len = from.distanceTo(to);
+  const geo = new THREE.CylinderGeometry(r2, r1, len, 22, 14);
+  const p = geo.attributes.position;
+  for (let i = 0; i < p.count; i++) {
+    const x = p.getX(i), y = p.getY(i), z = p.getZ(i), t = y / len + .5, th = Math.atan2(x, z);
+    const crease = .55 * Math.sin(t * 17 + th * 2 + seed) + .35 * Math.sin(t * 29 - th * 3 + seed * 2.3) + .25 * Math.sin(t * 8 + th * 5 + seed * .7);
+    const bunch = bunchA * gauss(t, .2) + bunchB * gauss(t - 1, .2);   // cloth gathers at the elbow, knee or ankle
+    const k = 1 + folds * crease * (.5 + bunch) + bunch * .04;
+    p.setX(i, x * k); p.setZ(i, z * k);
+  }
+  geo.computeVertexNormals();
+  geo.applyMatrix4(new THREE.Matrix4().makeRotationFromQuaternion(new THREE.Quaternion().setFromUnitVectors(vec(0, 1, 0), to.clone().sub(from).normalize())));
+  return geo.translate((from.x + to.x) / 2, (from.y + to.y) / 2, (from.z + to.z) / 2);
+}
+function roundBox(w, h, d, r = .008) {   // a box with softly rounded edges, like a stitched pocket or pouch
+  const bs = Math.min(r, d / 2 - .0005), x = w / 2 - bs, y = h / 2 - bs, c = Math.min(r, x, y);
+  const s = new THREE.Shape();
+  s.moveTo(-x + c, -y); s.lineTo(x - c, -y); s.quadraticCurveTo(x, -y, x, -y + c); s.lineTo(x, y - c);
+  s.quadraticCurveTo(x, y, x - c, y); s.lineTo(-x + c, y); s.quadraticCurveTo(-x, y, -x, y - c); s.lineTo(-x, -y + c);
+  s.quadraticCurveTo(-x, -y, -x + c, -y);
+  const depth = Math.max(.001, d - 2 * bs);
+  const geo = new THREE.ExtrudeGeometry(s, { depth, bevelEnabled: true, bevelThickness: bs, bevelSize: bs, bevelSegments: 2, curveSegments: 3 });
+  return geo.translate(0, 0, -depth / 2);
+}
+function outlineR(outline, y) {      // how wide the body outline is at height y
+  for (let i = 0; i < outline.length - 1; i++) {
+    const [r0, y0] = outline[i], [r1, y1] = outline[i + 1];
+    if (y >= y0 && y <= y1) return r0 + (r1 - r0) * (y - y0) / (y1 - y0);
+  }
+  return 0;
+}
+function torsoGeo(outline, kind) {   // the tunic: the body outline spun round, then given folds and creases
+  const pts = [];
+  for (let i = 0; i < outline.length - 1; i++) {        // add rows in between, so the cloth has room to fold
+    const [r0, y0] = outline[i], [r1, y1] = outline[i + 1], n = Math.max(1, Math.round(Math.abs(y1 - y0) / .012));
+    for (let j = 0; j < n; j++) pts.push([r0 + (r1 - r0) * j / n, y0 + (y1 - y0) * j / n]);
+  }
+  pts.push(outline[outline.length - 1]);
+  const geo = lathe(pts, 48), p = geo.attributes.position;
+  for (let i = 0; i < p.count; i++) {
+    const x = p.getX(i), y = p.getY(i), z = p.getZ(i), th = Math.atan2(x, z);
+    let k = 1 + .024 * (noise2(th * 2.5 + 7, y * 14) - .5);                                   // cloth is never perfectly smooth
+    if (kind === "german") k += .03 * Math.sin(th * 13) * clamp01((.97 - y) / .15);           // tunic skirt hanging in folds
+    else k += .04 * Math.max(0, Math.sin(y * 230 + th * 1.5)) * gauss(y - 1.075, .035);        // blouse bunched over the waistband
+    k += .012 * Math.sin(th * 7 + y * 40) * gauss(y - 1.3, .12);                               // soft drape across the chest
+    p.setX(i, x * k); p.setZ(i, z * k);
+  }
+  geo.computeVertexNormals();
+  return geo.scale(1.18, 1, .72);
+}
+
+// The cloth pattern is drawn by the graphics card from each point's position, so it never stretches
+// or shows seams: a fine twill weave for wool, a basket weave for canvas webbing, grain for leather.
+const CLOTH_GLSL = `
+float clothHash(vec3 p) { return fract(sin(dot(p, vec3(12.9898, 78.233, 37.719))) * 43758.5453); }
+float clothNoise(vec3 p) {
+  vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(mix(clothHash(i), clothHash(i + vec3(1.0, 0.0, 0.0)), f.x), mix(clothHash(i + vec3(0.0, 1.0, 0.0)), clothHash(i + vec3(1.0, 1.0, 0.0)), f.x), f.y),
+             mix(mix(clothHash(i + vec3(0.0, 0.0, 1.0)), clothHash(i + vec3(1.0, 0.0, 1.0)), f.x), mix(clothHash(i + vec3(0.0, 1.0, 1.0)), clothHash(i + vec3(1.0, 1.0, 1.0)), f.x), f.y), f.z);
+}
+float weave(float v) {               // fine lines that fade away when too small to see, instead of shimmering
+  return 0.5 + 0.5 * sin(v) * clamp(1.0 - fwidth(v) * 0.6, 0.0, 1.0);
+}`;
+function clothShader(shader) {
+  shader.vertexShader = shader.vertexShader
+    .replace("#include <common>", "#include <common>\nattribute float fabric;\nvarying float vFabric;\nvarying vec3 vCloth;")
+    .replace("#include <begin_vertex>", "#include <begin_vertex>\nvFabric = fabric;\nvCloth = position;");
+  shader.fragmentShader = shader.fragmentShader
+    .replace("#include <common>", "#include <common>\nvarying float vFabric;\nvarying vec3 vCloth;\n" + CLOTH_GLSL)
+    .replace("#include <color_fragment>", `#include <color_fragment>
+      if (vFabric > 0.5) {
+        vec3 p = vCloth;
+        float fibre = clothNoise(p * 500.0), mottle = clothNoise(p * 22.0), wear = clothNoise(p * 6.0 + 3.0), shade;
+        if (vFabric < 1.5) shade = 0.92 + 0.08 * weave((p.x * 0.7 + p.y + p.z * 0.7) * 1300.0) + 0.07 * (fibre - 0.5) + 0.1 * (mottle - 0.5);
+        else if (vFabric < 2.5) shade = 0.9 + 0.1 * weave(p.y * 900.0) * weave((p.x + p.z) * 900.0) + 0.06 * (fibre - 0.5) + 0.12 * (mottle - 0.5);
+        else shade = 0.95 + 0.1 * (clothNoise(p * 160.0) - 0.5) + 0.1 * (mottle - 0.5);
+        diffuseColor.rgb *= shade * (0.94 + 0.12 * wear);
+      }`);
+}
+function muddy(geo, amount) {        // dirt that builds up towards the ground, worked out from each point's height
+  const p = geo.attributes.position, c = geo.attributes.color, mud = new THREE.Color(0x4b3d2c), col = new THREE.Color();
+  for (let i = 0; i < p.count; i++) {
+    const m = amount(p.getX(i), p.getY(i), p.getZ(i));
+    if (m > 0) { col.fromArray(c.array, i * 3).lerp(mud, m).toArray(c.array, i * 3); }
+  }
+  return geo;
+}
+
+function soldierGeometry(kind) {     // built once per army, then shared by every soldier of that army
+  const k = KITS[kind], german = kind === "german", us = kind === "american";
+  const strapFabric = german ? LEATHER : CANVAS;
+  const T = [], add = (geo, color, at = [0, 0, 0], rot, scale, fabric = 0) => T.push({ geo, color, at, rot, scale, fabric });
+  const strap = (a, b, color, r = .013, fabric = strapFabric) => add(limbGeo(a, b, r, r, 6), color, [0, 0, 0], undefined, undefined, fabric);
+  const round = (geo, sx, sz) => geo.scale(sx, 1, sz);          // squash a round shape into a body shape
+  const button = (at, color = german ? 0x6f7268 : us ? 0x4a3626 : 0x5a4a32) => add(ball(.0085, .0085, .004, 10), color, at);
+
+  // tunic: one outline from the hips to the neck (chest, waist, hips), with folds, shoulders, collar, shoulder straps
+  const outline = german
+    ? [[0, .79], [.2, .8], [.215, .86], [.205, .95], [.18, 1.04], [.178, 1.12], [.19, 1.22], [.207, 1.32], [.216, 1.4], [.21, 1.47], [.185, 1.53], [.13, 1.575], [.075, 1.6], [0, 1.6]]
+    : [[0, .84], [.15, .85], [.185, .9], [.19, .97], [.176, 1.04], [.174, 1.12], [.188, 1.22], [.206, 1.32], [.215, 1.4], [.21, 1.47], [.185, 1.53], [.13, 1.575], [.075, 1.6], [0, 1.6]];
+  const chestZ = y => outlineR(outline, y) * .72;                    // how far the front of the tunic sticks out at height y
+  add(torsoGeo(outline, kind), k.tunic, undefined, undefined, undefined, WOOL);
+  [-1, 1].forEach(s => {
+    add(ball(.085, .082, .098, 20), k.tunic, [s * .245, 1.5, 0], undefined, undefined, WOOL);                       // shoulder
+    add(roundBox(.13, .05, .012, .006), k.tunic, [s * .17, 1.567, 0], [-Math.PI / 2, 0, s * -.35], undefined, WOOL);   // shoulder strap
+    button([s * .115, 1.588, 0]);
+  });
+  add(new THREE.CylinderGeometry(.084, .092, .055, 24, 1, true), german ? 0x2f3a2e : k.tunic, [0, 1.595, 0], undefined, undefined, WOOL);   // collar
+  if (german) [-1, 1].forEach(s => add(roundBox(.03, .022, .006, .003), 0x8f9187, [s * .042, 1.597, .078], [0, s * .5, 0]));   // collar tabs
+
+  // head: neck, the sculpted face, eyes with lids, ears
+  add(new THREE.CylinderGeometry(.058, .066, .14, 16), SKIN, [0, 1.63, 0]);
+  add(headGeometry(), SKIN, [0, HEAD.y, 0]);
+  const iris = { british: 0x56697a, american: 0x5b4128, german: 0x587d8f }[kind];
+  [-1, 1].forEach(s => {
+    const [ex, ey, ez] = facePoint(s * .034, .008), eye = [ex, HEAD.y + ey, ez - .0035];
+    add(ball(.013, .0088, .011, 18), 0xe6ddd0, eye);                                         // white of the eye
+    add(ball(.0056, .0056, .0018, 16), iris, [eye[0], eye[1] + .0004, eye[2] + .0102]);      // iris
+    add(ball(.0026, .0026, .001, 10), 0x0e0c0b, [eye[0], eye[1] + .0004, eye[2] + .0115]);   // pupil
+    add(eyelid(0, 1.2, true), SKIN, eye);                                                     // upper lid with lashes
+    add(eyelid(2.25, Math.PI - 2.25, false), SKIN, eye);                                      // lower lid
+    const ear = [s * .093, HEAD.y - .008, -.008];
+    add(ball(.012, .031, .021, 14), SKIN, ear, [0, s * -.3, s * .08]);
+    add(ball(.006, .019, .012, 10), 0xb88066, [ear[0] + s * .006, ear[1], ear[2] + .002], [0, s * -.3, 0]);   // inside of the ear
+  });
+  add(helmetGeo(kind), k.helmet, [0, kind === "british" ? 1.835 : 1.83, 0], undefined, undefined, LEATHER);   // matt painted steel
+  if (kind === "british") {                                                                // chin strap
+    strap([-.096, 1.805, .01], [-.045, 1.672, .045], k.web, .006); strap([.096, 1.805, .01], [.045, 1.672, .045], k.web, .006);
+    strap([-.045, 1.672, .045], [.045, 1.672, .045], k.web, .006);
+  } else if (us) {                                                                          // straps left hanging, as GIs wore them
+    strap([-.14, 1.79, .01], [-.12, 1.66, .05], k.web, .006); strap([.14, 1.79, .01], [.12, 1.66, .05], k.web, .006);
+  }
+
+  // arms holding the rifle: creased sleeves that gather at the elbow, a cuff, a fist with a thumb
+  const arm = (shoulder, elbow, wrist, hand, seed) => {
+    add(clothTube(shoulder, elbow, .085, .07, { folds: .05, bunchB: .9, seed }), k.tunic, undefined, undefined, undefined, WOOL);
+    add(ball(.074, .074, .074), k.tunic, elbow, undefined, undefined, WOOL);
+    add(clothTube(elbow, wrist, .068, .054, { folds: .05, bunchA: .9, bunchB: .4, seed: seed + 2 }), k.tunic, undefined, undefined, undefined, WOOL);
+    add(limbGeo(wrist, wrist.map((v, i) => v + (hand[i] - wrist[i]) * .3), .058, .058), k.tunic, undefined, undefined, undefined, WOOL);   // cuff
+    add(ball(.042, .05, .056, 12), SKIN, hand);
+    add(limbGeo(hand, [hand[0] + .02, hand[1] + .04, hand[2] + .03], .016, .013, 8), SKIN);           // thumb
+  };
+  arm([.28, 1.5, 0], [.33, 1.24, .1], [.15, 1.32, .29], [.13, 1.33, .32], 1);
+  arm([-.28, 1.5, 0], [-.25, 1.22, .38], [.03, 1.31, .7], [.07, 1.32, .75], 4);
+
+  // pockets with buttoned flaps, and the kit each army carried
+  const pocket = (x, y, w = .1, h = .1, z = chestZ(y) + .006) => {
+    add(roundBox(w, h, .014, .006), k.tunic, [x, y, z], undefined, undefined, WOOL);
+    add(roundBox(w * 1.05, .036, .016, .006), k.tunic, [x, y + h / 2 - .012, z + .004], undefined, undefined, WOOL);   // flap
+    button([x, y + h / 2 - .022, z + .013]);
+  };
+  const kit = (geo, color, at, rot, fabric = CANVAS) => add(geo, color, at, rot, undefined, fabric);
+  if (german) {
+    [-1, 1].forEach(s => { pocket(s * .095, 1.38); pocket(s * .11, .9, .12, .12, .168); });
+    for (const y of [1.08, 1.18, 1.28, 1.38, 1.48]) button([0, y, chestZ(y) + .006]);           // front buttons
+    kit(round(new THREE.CylinderGeometry(.2, .2, .052, 24, 1, true), 1.18, .74), k.web, [0, 1.0, 0], undefined, LEATHER);   // black leather belt
+    add(roundBox(.065, .05, .012, .004), 0x7a7a72, [0, 1.0, .152]);                              // grey buckle
+    [-1, 1].forEach(s => {
+      for (let i = 0; i < 3; i++) {                                                               // triple ammo pouches
+        const at = [s * (.06 + i * .042), 1.03, .165 - i * .012], rot = [0, s * -.2, 0];
+        kit(roundBox(.04, .075, .045, .007), 0x2a231c, at, rot, LEATHER);
+        kit(roundBox(.042, .03, .048, .006), 0x231d17, [at[0], 1.06, at[2] + .003], rot, LEATHER);
+      }
+      strap([s * .09, 1.03, .16], [s * .115, 1.53, .07], k.web);                                  // Y-straps
+    });
+    strap([0, 1.02, -.15], [0, 1.4, -.13], k.web);
+    [-1, 1].forEach(s => strap([0, 1.4, -.13], [s * .115, 1.53, -.06], k.web));
+    kit(roundBox(.2, .17, .07, .02), 0x6b6b55, [.17, .92, -.14], [0, .5, 0]);                   // bread bag
+    kit(roundBox(.205, .07, .075, .015), 0x5f5f4a, [.17, .98, -.14], [0, .5, 0]);
+    kit(ball(.05, .08, .04), 0x5a4a32, [.22, .9, -.2], undefined, WOOL);                         // canteen in its felt cover
+    add(new THREE.CylinderGeometry(.06, .06, .3, 18), 0x535a48, [-.12, 1.07, -.22]);            // gas mask canister
+    for (const y of [.97, 1.07, 1.17]) add(new THREE.CylinderGeometry(.064, .064, .012, 18), 0x464c3c, [-.12, y, -.22]);
+    kit(roundBox(.03, .26, .025, .008), 0x1b1a18, [-.21, .86, -.05], [.15, 0, 0], LEATHER);    // bayonet
+    kit(roundBox(.12, .17, .04, .015), 0x3a3a30, [-.2, .94, -.13], [0, -.4, 0], LEATHER);       // spade in its leather case
+  } else {
+    kit(round(new THREE.CylinderGeometry(.2, .2, .07, 24, 1, true), 1.18, .74), k.tunic, [0, 1.0, 0], undefined, WOOL);   // waistband
+    kit(round(new THREE.CylinderGeometry(.205, .205, .055, 24, 1, true), 1.18, .74), k.web, [0, 1.0, 0]);   // webbing belt
+    [-1, 1].forEach(s => pocket(s * .095, 1.4));
+    if (us) {
+      for (const y of [1.14, 1.25, 1.36, 1.47]) button([.025, y, chestZ(y) + .006]);           // jacket buttons
+      for (let i = -5; i <= 5; i++) {                                                            // cartridge belt full of clip pouches
+        if (i === 0) continue;
+        const a = i * .24, at = [Math.sin(a) * .245, 1.0, Math.cos(a) * .155 + .02];
+        kit(roundBox(.055, .07, .035, .007), k.web, at, [0, a, 0]);
+        button([at[0] + Math.sin(a) * .019, 1.02, at[2] + Math.cos(a) * .019], 0x6a6a62);
+      }
+      add(roundBox(.06, .05, .012, .004), 0x7a7a72, [0, 1.0, .162]);
+      [-1, 1].forEach(s => { strap([s * .1, 1.03, .16], [s * .12, 1.53, .07], k.web); strap([s * .12, 1.53, -.06], [s * .1, 1.03, -.16], k.web); });
+      kit(roundBox(.24, .3, .1, .025), k.web, [0, 1.28, -.2]);                                  // haversack
+      kit(roundBox(.25, .08, .11, .02), k.web, [0, 1.4, -.2]);
+      kit(roundBox(.12, .2, .045, .01), 0x5a5440, [0, 1.06, -.2]);                              // shovel cover
+      kit(ball(.055, .08, .035), 0x6e6548, [.18, .92, -.13]);                                    // canteen
+    } else {
+      add(roundBox(.03, .022, .008, .003), 0x8a7a50, [.13, 1.0, .148]);                         // waistband buckle
+      [-1, 1].forEach(s => {
+        kit(roundBox(.11, .14, .075, .014), k.web, [s * .095, 1.2, .145]);                     // basic pouches
+        kit(roundBox(.116, .05, .082, .012), k.web, [s * .095, 1.255, .148]);
+        add(ball(.006, .006, .003, 8), 0x8a7a50, [s * .095, 1.24, .19]);                        // press stud
+        strap([s * .095, 1.27, .17], [s * .12, 1.53, .07], k.web);                              // braces over the shoulders
+        strap([s * .12, 1.53, -.06], [-s * .1, 1.03, -.16], k.web);                             // crossing at the back
+      });
+      kit(roundBox(.3, .28, .13, .03), k.web, [0, 1.3, -.215]);                                 // small pack
+      kit(roundBox(.31, .07, .14, .02), k.web, [0, 1.42, -.215]);
+      kit(ball(.06, .09, .04), k.web, [-.2, .93, -.08]);                                        // water bottle
+      kit(roundBox(.12, .18, .05, .015), k.web, [.14, 1.0, -.19]);                              // entrenching tool
+    }
+  }
+
+  // legs: creased trousers that bunch at the knee and blouse over the boots or gaiters
+  const H = [], K = [], addTo = (list, geo, color, at = [0, 0, 0], rot, scale, fabric = 0) => list.push({ geo, color, at, rot, scale, fabric });
+  addTo(H, clothTube([0, .02, 0], [0, -.43, .01], .125, .095, { folds: .045, bunchB: .7, seed: 6 }), k.trousers, undefined, undefined, undefined, WOOL);
+  if (kind === "british") {                           // battledress trousers have a big map pocket on the thigh
+    addTo(H, roundBox(.1, .13, .016, .006), k.trousers, [0, -.17, .117], [-.05, 0, 0], undefined, WOOL);
+    addTo(H, roundBox(.105, .035, .018, .006), k.trousers, [0, -.115, .122], [-.05, 0, 0], undefined, WOOL);
+  }
+  addTo(K, ball(.1, .09, .102), k.trousers, undefined, undefined, undefined, WOOL);                // knee
+  addTo(K, clothTube([0, 0, 0], [0, -.37, -.01], .093, .066, { folds: .05, bunchA: .6, seed: 8 }), k.trousers, undefined, undefined, undefined, WOOL);
+  if (german) {
+    addTo(K, ball(.1, .045, .1), k.trousers, [0, -.075, -.005], undefined, undefined, WOOL);      // trousers bloused into the boots
+    addTo(K, clothTube([0, -.08, -.005], [0, -.41, -.005], .094, .08, { folds: .04, bunchB: 1, seed: 9 }), k.boots, undefined, undefined, undefined, LEATHER);   // jackboots, creased at the ankle
+  } else if (us) {
+    addTo(K, ball(.094, .04, .094), k.trousers, [0, -.17, -.005], undefined, undefined, WOOL);
+    addTo(K, new THREE.CylinderGeometry(.088, .078, .22, 20), 0xa39472, [0, -.29, -.005], undefined, undefined, CANVAS);   // canvas leggings
+    for (let i = 0; i < 5; i++) addTo(K, ball(.006, .006, .006, 6), 0x2a2a28, [.08 - i * .001, -.2 - i * .045, .03]);   // lace hooks
+  } else {
+    addTo(K, ball(.088, .038, .088), k.trousers, [0, -.285, -.005], undefined, undefined, WOOL);
+    addTo(K, new THREE.CylinderGeometry(.078, .08, .1, 20), k.web, [0, -.34, -.005], undefined, undefined, CANVAS);   // webbing anklets
+    for (const y of [-.315, -.36]) addTo(K, new THREE.CylinderGeometry(.081, .081, .012, 20), 0x6d6a48, [0, y, -.005], undefined, undefined, CANVAS);   // anklet straps
+  }
+  addTo(K, new THREE.CylinderGeometry(.068, .072, .07, 16), k.boots, [0, -.405, 0], undefined, undefined, LEATHER);   // ankle
+  addTo(K, ball(.068, .048, .14), k.boots, [0, -.43, .05], undefined, undefined, LEATHER);       // foot
+  if (!german) for (let i = 0; i < 3; i++) addTo(K, new THREE.BoxGeometry(.05, .005, .008), 0x1a1612, [0, -.39 - i * .012, .06 + i * .022], [.7, 0, 0]);   // laces
+  addTo(K, new THREE.BoxGeometry(.13, .022, .29), 0x14110e, [0, -.461, .045]);                     // sole
+  addTo(K, new THREE.BoxGeometry(.12, .03, .07), 0x14110e, [0, -.452, -.06]);                      // heel
+
+  const shin = muddy(mergeParts(K, 0, true), (x, y, z) => clamp01((-.27 - y) / .2) * .5 + gauss(y, .06) * clamp01(z / .1) * .18);   // mud on the boots, dusty knees
+  const thigh = muddy(mergeParts(H, 0, true), (x, y, z) => clamp01((-.33 - y) / .1) * .15 * clamp01(z / .08));
+  return { torso: mergeParts(T, 0, true), thigh, shin };
+}
+const soldierGeos = {};
+
+function buildSoldier(kind) {
+  const geos = soldierGeos[kind] || (soldierGeos[kind] = soldierGeometry(kind));
   const g = new THREE.Group();
   g.rotation.order = "YXZ";
-  // smooth per-pixel lighting so rounded parts don't show jagged patches
-  const mat = color => new THREE.MeshPhongMaterial({ color, shininess: 6, specular: 0x151515 });
-  const uni = mat(uniformColor);
-  const dark = mat(0x24241e);
-  const skin = mat(0xd8b08c);
-  const helm = mat(helmetColor);
-  const wood = mat(0x5a3d22);
+  // one material per soldier (colours come from the shapes), so a hit can flash just him
+  const mat = new THREE.MeshPhongMaterial({ vertexColors: true, shininess: 6, specular: 0x121212, side: THREE.DoubleSide });
+  mat.onBeforeCompile = clothShader;                  // adds the wool, canvas and leather patterns
+  mat.extensions = { derivatives: true };
+  const mesh = (geo, parent, material = mat) => {
+    const m = new THREE.Mesh(geo, material); m.castShadow = true; parent.add(m); return m;
+  };
   // skeleton: body (bobs and rolls) holds the legs and the upper body,
   // which pivots at the hips so it can lean, twist and take recoil
   const body = new THREE.Group(); g.add(body);
   const upper = new THREE.Group(); upper.position.y = .95; body.add(upper);
   const torso = new THREE.Group(); torso.position.y = -.95; upper.add(torso);   // lets parts below use plain heights
-  const part = (geo, mat, x, y, z, parent = torso) => {
-    const m = new THREE.Mesh(geo, mat); m.position.set(x, y, z); m.castShadow = true; parent.add(m); return m;
-  };
-  const webbing = mat(enemy ? 0x2b2b26 : 0x8a7f55);
-  // a rounded limb running from point a to point b
-  const limb = (a, b, r1, r2, mat) => {
-    const from = new THREE.Vector3(...a), to = new THREE.Vector3(...b);
-    const len = from.distanceTo(to);
-    const m = part(new THREE.CylinderGeometry(r2, r1, len, 16), mat, 0, 0, 0);
-    m.position.copy(from).add(to).multiplyScalar(.5);
-    m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), to.clone().sub(from).normalize());
-    part(new THREE.SphereGeometry(r2 * 1.12, 16, 12), mat, ...b);       // rounded joint (a bit wider so it doesn't flicker)
-    return m;
-  };
-
-  // legs: the thigh swings from the hip, the shin and boot bend at the knee
   const hips = [], knees = [];
   [-.13, .13].forEach(side => {
     const hip = new THREE.Group(); hip.position.set(side, .9, 0); body.add(hip);
-    part(new THREE.CylinderGeometry(.13, .11, .44, 16), uni, 0, -.2, 0, hip);    // thigh
+    mesh(geos.thigh, hip);
     const knee = new THREE.Group(); knee.position.set(0, -.43, .01); hip.add(knee);
-    part(new THREE.SphereGeometry(.122, 16, 12), uni, 0, 0, 0, knee);            // knee
-    part(new THREE.CylinderGeometry(.1, .085, .36, 16), uni, 0, -.17, -.01, knee);   // shin
-    part(new THREE.CylinderGeometry(.095, .1, .14, 24), dark, 0, -.33, -.01, knee);  // boot top
-    part(new THREE.BoxGeometry(.18, .1, .32), dark, 0, -.42, .04, knee);             // boot
+    mesh(geos.shin, knee);
     hips.push(hip); knees.push(knee);
   });
-
-  // torso: hips, waist, then a broader chest and shoulders (a fit, normal soldier build)
-  part(new THREE.BoxGeometry(.42, .2, .27), uni, 0, .95, 0);             // hips
-  part(new THREE.CylinderGeometry(.24, .21, .3, 12), uni, 0, 1.15, 0).scale.set(1, 1, .68);   // waist
-  part(new THREE.CylinderGeometry(.29, .25, .32, 12), uni, 0, 1.42, 0).scale.set(1, 1, .62);  // chest
-  part(new THREE.BoxGeometry(.6, .1, .26), uni, 0, 1.56, -.01);          // shoulder line
-  [-.29, .29].forEach(x => part(new THREE.SphereGeometry(.11, 16, 12), uni, x, 1.53, 0));      // shoulders
-  part(new THREE.BoxGeometry(.5, .07, .32), dark, 0, 1.02, 0);           // belt
-  part(new THREE.BoxGeometry(.07, .06, .02), helm, 0, 1.02, .165);       // buckle
-  [-.16, .16].forEach(x => part(new THREE.BoxGeometry(.11, .1, .07), webbing, x, 1.04, .17));  // ammo pouches
-  [-.13, .13].forEach(x => part(new THREE.BoxGeometry(.05, .5, .03), webbing, x, 1.3, .2));    // chest straps
-  [-.13, .13].forEach(x => part(new THREE.BoxGeometry(.05, .5, .03), webbing, x, 1.3, -.2));   // back straps
-  part(new THREE.BoxGeometry(.36, .36, .14), webbing, 0, 1.3, -.24);     // backpack
-  part(new THREE.BoxGeometry(.34, .06, .1), webbing, 0, 1.5, -.22);      // bedroll on top
-
-  // neck and head
-  part(new THREE.CylinderGeometry(.075, .085, .14, 24), skin, 0, 1.64, 0);
-  part(new THREE.SphereGeometry(.13, 20, 16), skin, 0, 1.77, .01).scale.set(.95, 1.1, 1);
-  part(new THREE.BoxGeometry(.17, .08, .14), skin, 0, 1.68, .05);        // jaw
-  part(new THREE.BoxGeometry(.035, .06, .05), skin, 0, 1.75, .14);       // nose
-  [-.125, .125].forEach(x => part(new THREE.SphereGeometry(.03, 6, 6), skin, x, 1.76, 0));     // ears
-  part(new THREE.SphereGeometry(.2, 24, 12, 0, Math.PI * 2, 0, Math.PI / 2), helm, 0, 1.82, 0);
-  if (enemy) part(new THREE.CylinderGeometry(.21, .25, .14, 24), helm, 0, 1.77, -.02);   // flared helmet
-  else part(new THREE.CylinderGeometry(.3, .3, .03, 24), helm, 0, 1.82, 0);               // wide-brim helmet
-
-  // arms holding the rifle: upper arm, elbow, forearm, hand
-  limb([.3, 1.52, 0], [.33, 1.24, .1], .085, .075, uni);                 // right arm
-  limb([.33, 1.24, .1], [.14, 1.33, .3], .072, .062, uni);
-  part(new THREE.SphereGeometry(.055, 12, 10), skin, .13, 1.33, .32);    // right hand
-  limb([-.3, 1.52, 0], [-.25, 1.22, .38], .085, .075, uni);              // left arm
-  limb([-.25, 1.22, .38], [.06, 1.32, .72], .072, .062, uni);
-  part(new THREE.SphereGeometry(.055, 12, 10), skin, .08, 1.32, .75);    // left hand
-
-  part(new THREE.BoxGeometry(.07, .1, 1.0), wood, .1, 1.36, .55);        // rifle
-  part(new THREE.BoxGeometry(.04, .04, .45), dark, .1, 1.39, 1.25);
-  const muzzle = new THREE.Object3D(); muzzle.position.set(.1, 1.39, 1.5); torso.add(muzzle);   // end of the barrel
+  mesh(geos.torso, torso);
+  rifleGeos[kind] = rifleGeos[kind] || rifleGeometry(kind);
+  mesh(rifleGeos[kind], torso, rifleMat).position.set(.1, 1.37, .02);                  // rifle, butt in the shoulder
+  const muzzle = new THREE.Object3D(); muzzle.position.set(.1, 1.376, 1.24); torso.add(muzzle);  // end of the barrel
+  const ejectPort = new THREE.Object3D(); ejectPort.position.set(.13, 1.4, .47); torso.add(ejectPort);   // where empty cases fly out
   g.scale.setScalar(1.1);                                                // a bit bigger than standard
   scene.add(g);
-  return { group: g, body, upper, hips, knees, muzzle, uni };
+  return { group: g, body, upper, hips, knees, muzzle, ejectPort, uni: mat };
 }
 
 // health bar floating above a soldier's head: green, then yellow, then red as health drops
@@ -503,7 +897,7 @@ function updateHealthBar(p) {
 }
 
 function makePlayer(num) {
-  const s = buildSoldier(num === 1 ? 0xc9b77a : 0x8fb4d8, num === 1 ? 0x6f6438 : 0x4f7398, false);
+  const s = buildSoldier(num === 1 ? "british" : "american");
   return {
     num, x: num === 1 ? -10 : 10, z: 0, yaw: 0, r: .5, hp: MAX_HP, ammo: MAG_SIZE, reload: 0, cool: 0,
     alive: true, vx: 0, vz: 0, walk: 0, gait: 0, kick: 0, ...s, bar: makeHealthBar(s.group),
@@ -517,7 +911,7 @@ function makeEnemy() {
     x = side === 0 ? MINX + 2 : side === 1 ? MAXX - 2 : rand(MINX + 2, MAXX - 2);
     z = side === 2 ? MINZ + 2 : side === 3 ? MAXZ - 2 : rand(MINZ + 2, MAXZ - 2);
   } while (blocked(x, z, .6));
-  const s = buildSoldier(0x3d4044, 0x55595e, true);
+  const s = buildSoldier("german");
   const maxHp = 40 + wave * 4;
   return { x, z, yaw: 0, r: .5, hp: maxHp, cool: rand(60, 140), strafe: Math.random() < .5 ? 1 : -1,
     vx: 0, vz: 0, pause: 0, walk: rand(0, 6), gait: 0, kick: 0, flash: 0, ...s };
@@ -539,6 +933,8 @@ function clearWorld() {
   for (const o of [...players, ...enemies, ...fallen]) scene.remove(o.group);
   for (const b of bullets) scene.remove(b.mesh);
   for (const p of puffs) scene.remove(p.mesh);
+  for (const c of casings) scene.remove(c.mesh);
+  casings = [];
   players = []; enemies = []; fallen = []; bullets = []; puffs = [];
 }
 function startGame(n) {
@@ -633,6 +1029,7 @@ function muzzleFlash(pos, yaw) {
 function shoot(from, yaw, team, spread) {
   const a = yaw + rand(-spread, spread), f = forward(a);
   from.kick = 1;                                         // rifle recoil, shown in poseSoldier
+  from.eject = 16;                                       // the empty case flies out as the bolt is worked
   const mesh = new THREE.Mesh(bulletGeo, team === "ally" ? allyTracer : enemyTracer);
   mesh.rotation.y = a; scene.add(mesh);
   bullets.push({ x: from.x + f.x * 1.2, z: from.z + f.z * 1.2, vx: f.x * BULLET_SPEED, vz: f.z * BULLET_SPEED, team, life: 60, mesh });
@@ -750,6 +1147,7 @@ function update() {
     if (p.life <= 0) scene.remove(p.mesh);
   }
   puffs = puffs.filter(p => p.life > 0);
+  updateCasings();
   for (const l of flashLights) l.intensity *= .45;       // flash light fades in a few frames
 
   if (!players.some(p => p.alive)) {
@@ -780,6 +1178,7 @@ function animateSoldier(s, down) {   // runs once per game step, so it looks the
   s.walk += speed * 1.9;                                 // steps follow distance, so feet don't slide
   s.breath = (s.breath || 0) + .04;
   s.kick *= .8;
+  if (s.eject > 0 && --s.eject === 0) ejectCasing(s);
 
   // which way the steps go: 1 = straight ahead, -1 = backwards, 0 = straight sideways
   if (speed > .005) {

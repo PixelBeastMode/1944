@@ -7,7 +7,7 @@
 //            5 game rules · 6 drawing · 7 controls
 // ============================================================
 
-const BUILD = 28;             // shown on screen, so you can tell the browser loaded the newest version
+const BUILD = 34;             // shown on screen, so you can tell the browser loaded the newest version
 document.querySelector(".tag").textContent += " · build " + BUILD;
 
 // ---------- 1) SETTINGS: change these to tweak the game ----------
@@ -30,9 +30,11 @@ const GRENADE_RADIUS = 6;     // how far a grenade blast reaches
 const GRENADE_DAMAGE = 160;   // damage right next to the blast (less further away)
 const BANDAGE_HEAL = 60;      // health one bandage gives back
 const BANDAGE_TIME = 70;      // frames it takes to put a bandage on
+const SOUND_VOLUME = 0.9;      // overall loudness (press M in the game to mute)
 const MAG_SIZE = 8;
 const RELOAD_TIME = 70;
-const MINX = -48, MAXX = 48, MINZ = -30, MAXZ = 30;   // edges of the battlefield
+const MINX = -80, MAXX = 80, MINZ = -52, MAXZ = 52;   // edges of the battlefield (inside the barbed wire)
+const WORLD_X = 150, WORLD_Z = 110;   // half the size of the whole landscape, including the woods outside the wire
 
 // ---------- 2) THE MAP: sandbags and ruined walls (x, z = corner; w, d = size) ----------
 const walls = [
@@ -46,6 +48,21 @@ const walls = [
   { x: 36.4, z: -3, w: 2.6, d: 6,  type: "bags" },
   { x: -18, z: -26, w: 10, d: 1.2, type: "ruin" },
   { x: 8,   z: 24.8, w: 10, d: 1.2, type: "ruin" },
+  // further out, in the wider field
+  { x: -64, z: -40, w: 12, d: 2.6, type: "bags" },
+  { x: 52,  z: -40, w: 12, d: 2.6, type: "bags" },
+  { x: -64, z: 37.4, w: 12, d: 2.6, type: "bags" },
+  { x: 52,  z: 37.4, w: 12, d: 2.6, type: "bags" },
+  { x: -70, z: -6,  w: 2.6, d: 12, type: "bags" },
+  { x: 67.4, z: -6, w: 2.6, d: 12, type: "bags" },
+  { x: -5,  z: -42, w: 10, d: 2.6, type: "bags" },
+  { x: -5,  z: 39.4, w: 10, d: 2.6, type: "bags" },
+  { x: 44,  z: 14,  w: 2.6, d: 10, type: "bags" },
+  { x: -46, z: 18,  w: 9, d: 1.2, type: "ruin" },
+  { x: -42, z: -46, w: 10, d: 1.2, type: "ruin" },
+  { x: 36,  z: 44,  w: 10, d: 1.2, type: "ruin" },
+  { x: 60,  z: 20,  w: 1.2, d: 9, type: "ruin" },
+  { x: 30,  z: -34, w: 8, d: 1.2, type: "ruin" },
 ];
 for (const w of walls) w.top = w.type === "bags" ? 1.3 : 2.6;   // how tall each wall is (bullets fly over low ones from up high)
 
@@ -202,21 +219,52 @@ const rightOf = yaw => ({ x: -Math.cos(yaw), z: Math.sin(yaw) });
 // ---------- 3) THE 3D WORLD ----------
 const canvas = document.getElementById("game");
 const stage = document.getElementById("stage");
+// Colours in this file are written the way they look on screen. The renderer works with real light
+// levels and then tone-maps the result like a film camera, which gives much more natural lighting.
+const setHexOld = THREE.Color.prototype.setHex, setStyleOld = THREE.Color.prototype.setStyle;
+THREE.Color.prototype.setHex = function (hex) { setHexOld.call(this, hex); return this.convertSRGBToLinear(); };
+THREE.Color.prototype.setStyle = function (style) { setStyleOld.call(this, style); return this.convertSRGBToLinear(); };
+
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.outputEncoding = THREE.sRGBEncoding;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = .95;
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0xa7ab92);          // hazy overcast sky
-scene.fog = new THREE.Fog(0xa7ab92, 35, 115);
+const SKY_TOP = 0x7d93ab, SKY_HAZE = 0xc4c6b8;        // a hazy summer sky: blue-grey above, pale haze at the horizon
+scene.background = new THREE.Color(SKY_HAZE);
+scene.fog = new THREE.Fog(SKY_HAZE, 50, 190);
 
-scene.add(new THREE.HemisphereLight(0xe4e6d0, 0x4a4630, 0.8));
-const sun = new THREE.DirectionalLight(0xfff0d0, 0.85);
+// the sky: a big dome that follows the camera, blending from haze at the horizon to blue overhead, brighter near the sun
+const sky = new THREE.Mesh(new THREE.SphereGeometry(250, 32, 16), new THREE.ShaderMaterial({
+  side: THREE.BackSide, depthWrite: false, fog: false,
+  uniforms: { top: { value: new THREE.Color(SKY_TOP) }, haze: { value: new THREE.Color(SKY_HAZE) },
+    sunDir: { value: new THREE.Vector3(30, 50, 20).normalize() }, sunCol: { value: new THREE.Color(0xfff2d6) } },
+  vertexShader: "varying vec3 vDir;\nvoid main() { vDir = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }",
+  fragmentShader: [
+    "uniform vec3 top, haze, sunCol, sunDir; varying vec3 vDir;",
+    "void main() {",
+    "  float h = max(vDir.y, 0.0);",
+    "  vec3 col = mix(haze, top, pow(h, 0.55));",
+    "  float s = max(dot(vDir, sunDir), 0.0);",
+    "  col += sunCol * (pow(s, 6.0) * 0.25 + pow(s, 400.0) * 1.5);",
+    "  gl_FragColor = vec4(col, 1.0);",
+    "  #include <tonemapping_fragment>",
+    "  #include <encodings_fragment>",
+    "}"].join("\n"),
+}));
+sky.renderOrder = -1; sky.frustumCulled = false;
+scene.add(sky);
+
+scene.add(new THREE.HemisphereLight(0xc9d4df, 0x5e553d, 1.15));   // light from the sky above and the earth below
+const sun = new THREE.DirectionalLight(0xfff0d8, 2.4);
 sun.position.set(30, 50, 20);
 sun.castShadow = true;
-sun.shadow.mapSize.set(2048, 2048);
-Object.assign(sun.shadow.camera, { left: -60, right: 60, top: 45, bottom: -45, near: 1, far: 140 });
+sun.shadow.mapSize.set(4096, 4096);
+Object.assign(sun.shadow.camera, { left: -100, right: 100, top: 75, bottom: -75, near: 1, far: 240 });
 scene.add(sun);
 
 // ---- smooth random "noise", used to make the ground and plants look natural ----
@@ -229,7 +277,20 @@ function noise2(x, z) {              // gentle random hills, values 0..1
   return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
 }
 const fbm = (x, z) => noise2(x, z) * .5 + noise2(x * 2.1 + 5, z * 2.1) * .3 + noise2(x * 4.3, z * 4.3 + 9) * .2;
-function wallGap(x, z) {             // distance to the nearest sandbag or ruin wall
+// distance to the nearest wall: worked out once on a 1 m grid, then looked up (much faster on a big map)
+let gapGrid = null;
+function wallGap(x, z) {
+  if (!gapGrid) {
+    const nx = WORLD_X * 2 + 1, nz = WORLD_Z * 2 + 1, g = new Float32Array(nx * nz);
+    for (let j = 0; j < nz; j++) for (let i = 0; i < nx; i++) g[j * nx + i] = wallGapExact(i - WORLD_X, j - WORLD_Z);
+    gapGrid = { g, nx, nz };
+  }
+  const fx = x + WORLD_X, fz = z + WORLD_Z, i = Math.floor(fx), j = Math.floor(fz);
+  if (i < 0 || j < 0 || i >= gapGrid.nx - 1 || j >= gapGrid.nz - 1) return wallGapExact(x, z);
+  const u = fx - i, v = fz - j, g = gapGrid.g, n = gapGrid.nx, k = j * n + i;
+  return (g[k] * (1 - u) + g[k + 1] * u) * (1 - v) + (g[k + n] * (1 - u) + g[k + n + 1] * u) * v;
+}
+function wallGapExact(x, z) {        // distance to the nearest sandbag or ruin wall
   let best = 99;
   for (const w of walls) {
     const dx = Math.max(w.x - x, 0, x - (w.x + w.w)), dz = Math.max(w.z - z, 0, z - (w.z + w.d));
@@ -242,18 +303,31 @@ const track = (x, z) => clamp01(1 - Math.abs(z - 9 * Math.sin(x * .05) - 3) / 1.
 
 // shell craters, kept away from the walls and the spots where soldiers start
 const craters = [];
-for (let tries = 0; craters.length < 24 && tries < 600; tries++) {
-  const c = { x: rand(-64, 64), z: rand(-46, 46), r: rand(1.3, 3.6) };
+for (let tries = 0; craters.length < 55 && tries < 1500; tries++) {
+  const c = { x: rand(-MAXX - 30, MAXX + 30), z: rand(-MAXZ - 25, MAXZ + 25), r: rand(1.3, 3.6) };
   if (wallGap(c.x, c.z) < c.r + 1.5 || Math.hypot(Math.abs(c.x) - 10, c.z) < c.r + 2.5 || trenchAt(c.x, c.z).d < c.r + 2.5) continue;
   if (craters.some(o => Math.hypot(o.x - c.x, o.z - c.z) < o.r + c.r + .5)) continue;
   craters.push(c);
 }
+// craters sorted into 10 m squares, so each spot only checks the few nearby
+let craterCells = null;
+function cratersNear(x, z) {
+  if (!craterCells) {
+    craterCells = new Map();
+    for (const c of craters) for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) {
+      const key = (Math.floor(c.x / 10) + a) + "," + (Math.floor(c.z / 10) + b);
+      if (!craterCells.has(key)) craterCells.set(key, []);
+      craterCells.get(key).push(c);
+    }
+  }
+  return craterCells.get(Math.floor(x / 10) + "," + Math.floor(z / 10)) || [];
+}
 // how high the ground is at a spot: gentle rolls (flat by the walls) plus crater dips with raised rims
 function groundY(x, z, visual = false) {
-  const edge = clamp01((100 - Math.abs(x)) / 12) * clamp01((75 - Math.abs(z)) / 12);
+  const edge = clamp01((WORLD_X - Math.abs(x)) / 12) * clamp01((WORLD_Z - Math.abs(z)) / 12);
   const nearHouse = Math.hypot(Math.max(HOUSE.x0 - .5 - x, 0, x - HOUSE.x1 - .5), Math.max(HOUSE.z0 - .5 - z, 0, z - HOUSE.z1 - .5));
   let y = (fbm(x * .07, z * .07) - .5) * .55 * Math.min(1, wallGap(x, z) / 3) * edge * clamp01(nearHouse / 1.5);   // level where the house stands
-  for (const c of craters) {
+  for (const c of cratersNear(x, z)) {
     const d = Math.hypot(x - c.x, z - c.z) / c.r;
     if (d < 1.7) y += c.r * .14 * (-Math.max(0, 1 - d * d) + .35 * Math.exp(-(((d - 1) * 3.5) ** 2)));
   }
@@ -280,24 +354,24 @@ function groundY(x, z, visual = false) {
     g.beginPath(); g.moveTo(x, y); g.lineTo(x + rand(-3, 3), y - rand(3, 9)); g.stroke();
   }
   const tex = new THREE.CanvasTexture(c);
-  tex.wrapS = tex.wrapT = THREE.RepeatWrapping; tex.repeat.set(60, 45);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping; tex.repeat.set(WORLD_X * .6, WORLD_Z * .6);
   tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
 
-  const geo = new THREE.PlaneGeometry(200, 150, 500, 375); geo.rotateX(-Math.PI / 2);   // fine enough to show the trenches
+  const geo = new THREE.PlaneGeometry(WORLD_X * 2, WORLD_Z * 2, 640, 470); geo.rotateX(-Math.PI / 2);   // fine enough to show the trenches
   const pos = geo.attributes.position, cols = [];
-  const grass = new THREE.Color(0x667a38), dry = new THREE.Color(0x9a9152), dirt = new THREE.Color(0x7d6747);
+  const grass = new THREE.Color(0x5a7432), dry = new THREE.Color(0x8c874e), dirt = new THREE.Color(0x76624a);
   const mud = new THREE.Color(0x54432d), scorch = new THREE.Color(0x2f281d), col = new THREE.Color();
   for (let i = 0; i < pos.count; i++) {
     const x = pos.getX(i), z = pos.getZ(i);
     pos.setY(i, groundY(x, z, true));
-    col.copy(grass).lerp(dry, dryness(x, z) * .85);
+    col.copy(grass).lerp(dry, dryness(x, z) * .6);
     const inField = Math.abs(x) < MAXX + 2 && Math.abs(z) < MAXZ + 2;
-    let wear = Math.max(inField ? (1 - wallGap(x, z) / 2.8) * .85 : 0, Math.abs(x) < 90 ? track(x, z) * .9 : 0);
+    let wear = Math.max(inField ? (1 - wallGap(x, z) / 2.8) * .85 : 0, Math.abs(x) < WORLD_X - 10 ? track(x, z) * .9 : 0);
     wear += (noise2(x * .6, z * .6) - .5) * .45;      // ragged edges
     col.lerp(dirt, clamp01(wear));
     const tz = trenchAt(x, z);                         // dug earth round the trenches, mud in them
     if (tz.depth > .05 && tz.d < TRENCH.half + 1.9) col.lerp(tz.d < TRENCH.half + .2 ? mud : dirt, clamp01((TRENCH.half + 1.9 - tz.d) / .8) * .85 * clamp01(tz.depth * 3));
-    for (const cr of craters) {                       // churned mud with a scorched middle
+    for (const cr of cratersNear(x, z)) {             // churned mud with a scorched middle
       const d = Math.hypot(x - cr.x, z - cr.z) / cr.r;
       if (d < 1.5) { col.lerp(mud, clamp01(1.35 - d) * .9); if (d < .6) col.lerp(scorch, (.6 - d) * 1.3); }
     }
@@ -310,8 +384,8 @@ function groundY(x, z, visual = false) {
   ground.receiveShadow = true;
   scene.add(ground);
   // far-off ground beyond the edge of the field, with a hole in the middle so it never covers the trenches
-  const far = new THREE.Shape([[-300, -300], [300, -300], [300, 300], [-300, 300]].map(([x, y]) => new THREE.Vector2(x, y)));
-  far.holes.push(new THREE.Path([[-99, -74], [-99, 74], [99, 74], [99, -74]].map(([x, y]) => new THREE.Vector2(x, y))));
+  const far = new THREE.Shape([[-600, -600], [600, -600], [600, 600], [-600, 600]].map(([x, y]) => new THREE.Vector2(x, y)));
+  far.holes.push(new THREE.Path([[-WORLD_X + 1, -WORLD_Z + 1], [-WORLD_X + 1, WORLD_Z - 1], [WORLD_X - 1, WORLD_Z - 1], [WORLD_X - 1, -WORLD_Z + 1]].map(([x, y]) => new THREE.Vector2(x, y))));
   const outer = new THREE.Mesh(new THREE.ShapeGeometry(far), new THREE.MeshLambertMaterial({ color: 0x5e6838 }));
   outer.rotation.x = -Math.PI / 2; outer.position.y = -0.03;
   scene.add(outer);
@@ -408,66 +482,200 @@ function mergeParts(parts, dapple = .24, smooth = false) {
   return geo;
 }
 const pick = list => list[Math.floor(Math.random() * list.length)];
+const windTime = { value: 0 };     // drives grass and leaves swaying in the wind
 const outsideFence = (x, z, gap) => Math.abs(x) > MAXX + gap || Math.abs(z) > MAXZ + gap;
 
-// Trees beyond the fence: leafy trees, pines, and trees shattered by shellfire
+// ---------- PLANTS: branching trees with bark and leaves, pines with needles, leafy bushes ----------
+// Painted textures for bark, leaf clusters and pine needles (drawn once on hidden canvases).
+function paintTexture(w, h, draw, repeat) {
+  const c = document.createElement("canvas"); c.width = w; c.height = h;
+  draw(c.getContext("2d"), w, h);
+  const t = new THREE.CanvasTexture(c);
+  t.encoding = THREE.sRGBEncoding; t.anisotropy = 4;
+  if (repeat) t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  return t;
+}
+const barkTex = paintTexture(128, 256, (g, w, h) => {
+  g.fillStyle = "#6e6253"; g.fillRect(0, 0, w, h);
+  for (let i = 0; i < 260; i++) {                      // ridges and cracks running up the trunk
+    const x = Math.random() * w, y = Math.random() * h, len = 20 + Math.random() * 70, v = Math.random();
+    g.strokeStyle = v < .5 ? `rgba(40,32,24,${.3 + Math.random() * .4})` : `rgba(150,138,118,${.15 + Math.random() * .25})`;
+    g.lineWidth = 1 + Math.random() * 3;
+    g.beginPath(); g.moveTo(x, y); g.bezierCurveTo(x + rand(-4, 4), y + len * .3, x + rand(-4, 4), y + len * .6, x + rand(-3, 3), y + len); g.stroke();
+  }
+  for (let i = 0; i < 40; i++) { g.fillStyle = `rgba(90,110,60,${Math.random() * .25})`; g.fillRect(Math.random() * w, Math.random() * h, 6 + Math.random() * 14, 4 + Math.random() * 10); }   // moss
+}, true);
+const leafTex = paintTexture(256, 256, (g, w, h) => {
+  const greens = ["#3f5a22", "#4c6a28", "#587a2e", "#36501d", "#62853a", "#2f461a"];
+  for (let i = 0; i < 150; i++) {                      // a cluster of overlapping leaves, thicker in the middle
+    const a = Math.random() * 6.3, d = Math.pow(Math.random(), .7) * 108;
+    const x = 128 + Math.cos(a) * d, y = 128 + Math.sin(a) * d, s = 9 + Math.random() * 9, rot = Math.random() * 6.3;
+    g.save(); g.translate(x, y); g.rotate(rot);
+    g.fillStyle = greens[Math.floor(Math.random() * greens.length)];
+    g.beginPath(); g.ellipse(0, 0, s, s * .48, 0, 0, 6.3); g.fill();
+    g.strokeStyle = "rgba(20,30,10,.35)"; g.lineWidth = 1; g.beginPath(); g.moveTo(-s, 0); g.lineTo(s, 0); g.stroke();   // the middle vein
+    g.restore();
+  }
+});
+const needleTex = paintTexture(256, 128, (g, w, h) => {
+  g.strokeStyle = "#3a2c1e"; g.lineWidth = 3; g.beginPath(); g.moveTo(4, 64); g.lineTo(250, 64); g.stroke();   // the twig
+  for (let i = 0; i < 520; i++) {                      // needles sprouting along both sides, shorter towards the tip
+    const x = 6 + Math.random() * 240, side = Math.random() < .5 ? -1 : 1, len = (58 - x * .16) * (.6 + Math.random() * .5);
+    g.strokeStyle = ["#24381e", "#2c4424", "#33502a", "#1e301a"][i % 4]; g.lineWidth = 1.4;
+    g.beginPath(); g.moveTo(x, 64); g.lineTo(x + len * .45, 64 + side * len); g.stroke();
+  }
+});
+const barkMat = new THREE.MeshStandardMaterial({ map: barkTex, vertexColors: true, roughness: .95 });
+function foliageMaterial(map) {      // leaf cards: see-through between the leaves, swaying a little in the wind
+  const m = new THREE.MeshStandardMaterial({ map, vertexColors: true, alphaTest: .5, side: THREE.DoubleSide, roughness: .85 });
+  m.onBeforeCompile = shader => {
+    shader.uniforms.windTime = windTime;
+    shader.fragmentShader = shader.fragmentShader.replace("#include <normal_fragment_begin>", "#include <normal_fragment_begin>\n  normal = normalize( vNormal );");
+    shader.vertexShader = "uniform float windTime;\n" + shader.vertexShader.replace("#include <begin_vertex>", `#include <begin_vertex>
+      float sway = max(position.y - 1.0, 0.0) * 0.012;
+      transformed.x += sin(windTime * 1.3 + position.x * 0.35 + position.z * 0.2) * sway;
+      transformed.z += cos(windTime * 1.1 + position.z * 0.3) * sway * 0.7;`);
+  };
+  return m;
+}
+const leafMat = foliageMaterial(leafTex), needleMat = foliageMaterial(needleTex);
+
+// Collects shapes with texture coordinates and their own colours, then glues them into one mesh
+function plantBuilder() {
+  const pos = [], nor = [], uv = [], col = [], m = new THREE.Matrix4(), nm = new THREE.Matrix3(), c = new THREE.Color();
+  return {
+    // a tapered round branch from a to b, with bark wrapped round it
+    branch(a, b, r0, r1, color, sides = 7) {
+      const A = new THREE.Vector3(...a), B = new THREE.Vector3(...b), len = A.distanceTo(B);
+      const geo = new THREE.CylinderGeometry(r1, r0, len, sides, 1, true).toNonIndexed();
+      const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), B.clone().sub(A).normalize());
+      m.compose(A.clone().add(B).multiplyScalar(.5), q, new THREE.Vector3(1, 1, 1)); nm.getNormalMatrix(m);
+      geo.applyMatrix4(m);
+      const p = geo.attributes.position.array, n = geo.attributes.normal.array, t = geo.attributes.uv.array;
+      for (let i = 0, j = 0; i < p.length; i += 3, j += 2) {
+        pos.push(p[i], p[i + 1], p[i + 2]); nor.push(n[i], n[i + 1], n[i + 2]);
+        uv.push(t[j] * Math.max(1, r0 * 12), t[j + 1] * len * 1.5);
+        c.set(color).multiplyScalar(.85 + hash2(p[i] * 2, p[i + 2] * 3) * .3); col.push(c.r, c.g, c.b);
+      }
+    },
+    // a flat card of leaves or needles. centre: where it is; size: [width, height]; normal: how it catches the light
+    card(center, size, rot, color, normal, uvRect = [0, 0, 1, 1]) {
+      const [w, h] = size, q = new THREE.Quaternion().setFromEuler(new THREE.Euler(...rot, "YXZ"));
+      const corners = [[-w / 2, -h / 2, 0, 0], [w / 2, -h / 2, 1, 0], [w / 2, h / 2, 1, 1], [-w / 2, -h / 2, 0, 0], [w / 2, h / 2, 1, 1], [-w / 2, h / 2, 0, 1]];
+      for (const [x, y, u, v] of corners) {
+        const pt = new THREE.Vector3(x, y, 0).applyQuaternion(q).add(center);
+        pos.push(pt.x, pt.y, pt.z); nor.push(normal.x, normal.y, normal.z);
+        uv.push(uvRect[0] + u * uvRect[2], uvRect[1] + v * uvRect[3]);
+        col.push(color.r, color.g, color.b);
+      }
+    },
+    mesh(material, shadows = true) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+      geo.setAttribute("normal", new THREE.Float32BufferAttribute(nor, 3));
+      geo.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2));
+      geo.setAttribute("color", new THREE.Float32BufferAttribute(col, 3));
+      const mesh = new THREE.Mesh(geo, material);
+      mesh.castShadow = shadows; mesh.receiveShadow = true;
+      if (material.alphaTest) mesh.customDepthMaterial = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking, map: material.map, alphaTest: material.alphaTest });
+      scene.add(mesh);
+      return mesh;
+    },
+  };
+}
+const V = (x, y, z) => new THREE.Vector3(x, y, z);
+// a ball of leaf cards; each card is lit as if it were part of one rounded crown, which looks soft and natural
+function leafCluster(L, center, radius, crownCenter, count, tint, cardSize = 1.1) {
+  const c = new THREE.Color();
+  for (let i = 0; i < count; i++) {
+    const d = V(rand(-1, 1), rand(-.7, 1), rand(-1, 1)).normalize().multiplyScalar(radius * Math.cbrt(Math.random()));
+    const at = center.clone().add(d), out = at.clone().sub(crownCenter);
+    const inside = clamp01(out.length() / (radius * 2));       // leaves deep inside the crown are in shade
+    const normal = out.normalize().multiplyScalar(.75).add(V(0, .45, 0)).normalize();
+    c.copy(tint).multiplyScalar(.55 + inside * .55 + rand(-.08, .08));
+    const s = cardSize * rand(.75, 1.25);
+    L.card(at, [s, s], [rand(-.6, .6), rand(0, 6.3), rand(0, 6.3)], c, normal);
+  }
+}
+
 (function makeTrees() {
-  const parts = [];
-  const bark = [0x3d3226, 0x463a2b, 0x342c22], leaves = [0x3d5223, 0x4a5e29, 0x55672e, 0x3a4a22], deadBark = [0x4a4238, 0x3b352e];
-  for (let i = 0; i < 120; i++) {
+  const B = plantBuilder(), L = plantBuilder(), N = plantBuilder();
+  const barks = [0xd6ccbc, 0xe2d6c2, 0xc8bfb0], deadBark = [0xe8e2d8, 0xd4ccc0];   // tints: the bark texture carries the colour
+  const leafTints = [0xdfe8c8, 0xeaf0cc, 0xd2e0bc, 0xf2eccc].map(h => new THREE.Color(h));
+  for (let i = 0; i < 240; i++) {
     let x, z;
-    do { x = rand(-92, 92); z = rand(-68, 68); } while (!outsideFence(x, z, 4));
-    const y = groundY(x, z) - .1, kind = Math.random(), lean = [rand(-.06, .06), 0, rand(-.06, .06)];
-    if (kind < .45) {                                 // leafy tree: trunk, a few branches, lumpy crown
-      const h = rand(3, 5.5), r = rand(.22, .34);
-      parts.push({ geo: new THREE.CylinderGeometry(r * .6, r, h, 7), at: [x, y + h / 2, z], rot: lean, color: pick(bark) });
+    do { x = rand(-WORLD_X + 8, WORLD_X - 8); z = rand(-WORLD_Z + 8, WORLD_Z - 8); } while (!outsideFence(x, z, 4));
+    const y = groundY(x, z) - .1, kind = Math.random();
+    if (kind < .45) {                                 // broadleaf tree: trunk, limbs, twigs and a crown of leaves
+      const h = rand(2.8, 4.5), r = rand(.2, .32), bark = pick(barks), tint = pick(leafTints);
+      const lean = V(rand(-.15, .15), 1, rand(-.15, .15)).normalize();
+      const top = V(x, y, z).addScaledVector(lean, h);
+      B.branch([x, y - .2, z], top.toArray(), r * 1.25, r * .7, bark, 9);
+      const crownCenter = top.clone().add(V(0, 1.6, 0)), clusters = [];
+      const limbs = 3 + Math.floor(Math.random() * 3);
+      for (let b = 0; b < limbs; b++) {
+        const a = b / limbs * 6.3 + rand(-.4, .4), up = rand(.5, 1.1), len = rand(1.5, 2.6);
+        const start = V(x, y, z).addScaledVector(lean, h * rand(.6, 1));
+        const dir = V(Math.cos(a), up, Math.sin(a)).normalize(), end = start.clone().addScaledVector(dir, len);
+        B.branch(start.toArray(), end.toArray(), r * .55, r * .2, bark);
+        for (let t = 0; t < 2; t++) {                 // twigs off each limb
+          const ta = a + rand(-1, 1), tdir = V(Math.cos(ta), up + rand(-.2, .5), Math.sin(ta)).normalize();
+          const ts = start.clone().lerp(end, rand(.5, .9)), te = ts.clone().addScaledVector(tdir, rand(.7, 1.3));
+          B.branch(ts.toArray(), te.toArray(), r * .2, .02, bark, 5);
+          clusters.push(te);
+        }
+        clusters.push(end);
+      }
+      for (const c of clusters) leafCluster(L, c, rand(.8, 1.2), crownCenter, 13, tint);
+      leafCluster(L, crownCenter, 1.2, crownCenter, 14, tint);   // fill the middle of the crown
+    } else if (kind < .75) {                          // pine: straight trunk, whorls of drooping branches covered in needles
+      const h = rand(6, 9.5), bark = pick(barks);
+      B.branch([x, y - .2, z], [x, y + h, z], rand(.18, .26), .04, bark, 8);
+      for (let wy = 1.6; wy < h - .3; wy += rand(.45, .6)) {
+        const k = 1 - (wy - 1.6) / (h - 1.6), n = 5 + Math.floor(Math.random() * 3), off = rand(0, 6.3);
+        for (let b = 0; b < n; b++) {
+          const a = off + b / n * 6.3 + rand(-.25, .25), len = (.4 + k * 1.9) * rand(.8, 1.1);
+          const droop = -.25 - k * .25, dir = V(Math.cos(a), droop, Math.sin(a)).normalize();
+          const start = V(x, y + wy, z), end = start.clone().addScaledVector(dir, len);
+          B.branch(start.toArray(), end.toArray(), .045 * (.5 + k), .01, bark, 4);
+          const c = new THREE.Color(0xe4ecdc).multiplyScalar(.6 + (1 - k) * .3 + rand(-.05, .08));
+          const normal = V(Math.cos(a), .6, Math.sin(a)).normalize();
+          for (let s = 0; s < 2; s++)                 // two crossed sprays of needles along each branch
+            N.card(start.clone().lerp(end, .5), [len * 1.05, .55 + k * .35], [s ? 1.3 : .25, -a, droop], c, normal);
+        }
+      }
+    } else {                                          // tree shattered by shellfire: bare trunk, splintered top, dead limbs
+      const h = rand(2.5, 6), r = rand(.2, .32), bark = pick(deadBark);
+      B.branch([x, y - .2, z], [x + rand(-.3, .3), y + h, z + rand(-.3, .3)], r, r * .7, bark, 8);
+      for (let s = 0; s < 5; s++) {                   // splinters sticking up from the break
+        const a = rand(0, 6.3), d = r * .5;
+        B.branch([x + Math.cos(a) * d, y + h - .1, z + Math.sin(a) * d], [x + Math.cos(a) * d * 1.4, y + h + rand(.3, 1), z + Math.sin(a) * d * 1.4], r * .3, .01, 0xfff0d8, 4);   // pale splintered wood
+      }
       for (let b = 0; b < 3; b++) {
-        const a = rand(0, 6.3), len = rand(1, 1.8);
-        parts.push({ geo: new THREE.CylinderGeometry(.05, r * .45, len, 5), at: [x + Math.cos(a) * len * .35, y + h * .8 + len * .3, z + Math.sin(a) * len * .35],
-          rot: [Math.sin(a) * .9, 0, -Math.cos(a) * .9], color: pick(bark) });
-      }
-      const crown = rand(1.6, 2.6);
-      for (let b = 0; b < 6; b++) {
-        const s = crown * rand(.5, .8);
-        parts.push({ geo: lumpy(new THREE.IcosahedronGeometry(1, 1), .35), at: [x + rand(-1, 1) * crown * .55, y + h + rand(-.2, 1.2) * crown * .6, z + rand(-1, 1) * crown * .55],
-          scale: [s, s * rand(.75, .95), s], rot: [0, rand(0, 6), 0], color: pick(leaves) });
-      }
-    } else if (kind < .75) {                          // pine: thin trunk and stacked layers of needles
-      const h = rand(5, 8.5);
-      parts.push({ geo: new THREE.CylinderGeometry(.1, .24, h, 6), at: [x, y + h / 2, z], color: pick(bark) });
-      for (let b = 0; b < 4; b++) {
-        const w = (1 - b / 4.5) * rand(1.4, 1.9), ch = rand(1.6, 2.2);
-        parts.push({ geo: lumpy(new THREE.ConeGeometry(w, ch, 8, 1), .15), at: [x, y + h * .3 + b * h * .19 + ch / 2, z],
-          rot: [0, rand(0, 6), 0], color: b % 2 ? 0x34482a : 0x2f4226 });
-      }
-    } else {                                          // shattered tree: bare trunk with a splintered top
-      const h = rand(2.5, 6), r = rand(.2, .32);
-      parts.push({ geo: new THREE.CylinderGeometry(r * .7, r, h, 6), at: [x, y + h / 2, z], rot: lean, color: pick(deadBark) });
-      parts.push({ geo: new THREE.ConeGeometry(r * .7, rand(.5, 1.1), 5), at: [x + rand(-.05, .05), y + h + .3, z], rot: [rand(-.3, .3), 0, rand(-.3, .3)], color: 0x6b5a45 });
-      for (let b = 0; b < 2; b++) {
-        const a = rand(0, 6.3), len = rand(.6, 1.3);
-        parts.push({ geo: new THREE.CylinderGeometry(.03, .08, len, 4), at: [x + Math.cos(a) * len * .4, y + h * rand(.5, .85), z + Math.sin(a) * len * .4],
-          rot: [Math.sin(a) * 1.1, 0, -Math.cos(a) * 1.1], color: pick(deadBark) });
+        const a = rand(0, 6.3), start = V(x, y + h * rand(.4, .85), z), end = start.clone().add(V(Math.cos(a) * rand(.8, 1.6), rand(-.1, .8), Math.sin(a) * rand(.8, 1.6)));
+        B.branch(start.toArray(), end.toArray(), r * .3, .02, bark, 5);
       }
     }
   }
-  mergedMesh(parts);
+  B.mesh(barkMat); L.mesh(leafMat); N.mesh(needleMat);
 })();
 
-// Bushes along the fence and out in the fields
+// Bushes along the fence and out in the fields: a few twigs inside a dense clump of leaves
 (function makeBushes() {
-  const parts = [], greens = [0x45582a, 0x50632e, 0x3b4c25, 0x5d6a34];
-  for (let i = 0; i < 90; i++) {
+  const B = plantBuilder(), L = plantBuilder();
+  const tints = [0xd8e4c0, 0xe4ecc6, 0xccdcb6, 0xe8e6c2].map(h => new THREE.Color(h));
+  for (let i = 0; i < 170; i++) {
     let x, z;
-    do { x = rand(-95, 95); z = rand(-70, 70); } while (!outsideFence(x, z, 1.2));
-    const y = groundY(x, z), size = rand(.5, 1.1), color = pick(greens);
-    for (let b = 0; b < 3; b++) {
-      const s = size * rand(.6, 1);
-      parts.push({ geo: lumpy(new THREE.IcosahedronGeometry(1, 1), .4), at: [x + rand(-.6, .6) * size, y + s * .45, z + rand(-.6, .6) * size],
-        scale: [s, s * .75, s], rot: [0, rand(0, 6), 0], color });
+    do { x = rand(-WORLD_X + 5, WORLD_X - 5); z = rand(-WORLD_Z + 5, WORLD_Z - 5); } while (!outsideFence(x, z, 1.2));
+    const y = groundY(x, z), size = rand(.5, 1.1), tint = pick(tints), center = V(x, y + size * .6, z);
+    for (let t = 0; t < 4; t++) {
+      const a = rand(0, 6.3);
+      B.branch([x, y, z], [x + Math.cos(a) * size * .7, y + size * rand(.6, 1.1), z + Math.sin(a) * size * .7], .03, .01, 0xc8bca8, 4);
     }
+    for (let b = 0; b < 3; b++)
+      leafCluster(L, center.clone().add(V(rand(-.5, .5) * size, rand(-.2, .2) * size, rand(-.5, .5) * size)), size * .65, center, 9, tint, .75 * (.6 + size * .5));
   }
-  mergedMesh(parts);
+  B.mesh(barkMat, false); L.mesh(leafMat);
 })();
 
 // Rocks and rubble: around the ruins, on crater rims, and scattered about
@@ -476,7 +684,7 @@ const outsideFence = (x, z, gap) => Math.abs(x) > MAXX + gap || Math.abs(z) > MA
   const spots = [];
   for (const w of walls) if (w.type === "ruin") for (let i = 0; i < 14; i++) spots.push([w.x + rand(-1, w.w + 1), w.z + rand(-1.5, w.d + 1.5), .14]);
   for (const c of craters) for (let i = 0; i < 5; i++) { const a = rand(0, 6.3), d = c.r * rand(.9, 1.3); spots.push([c.x + Math.cos(a) * d, c.z + Math.sin(a) * d, .12]); }
-  for (let i = 0; i < 60; i++) spots.push([rand(-90, 90), rand(-66, 66), .22]);
+  for (let i = 0; i < 130; i++) spots.push([rand(-WORLD_X + 10, WORLD_X - 10), rand(-WORLD_Z + 10, WORLD_Z - 10), .22]);
   for (const [x, z, s0] of spots) {
     if (insideWall(x, z) || inRect(x, z, HOUSE, .3) || trenchAt(x, z).d < TRENCH.half + 1.4) continue;
     const s = s0 * rand(.6, 1.6);
@@ -622,37 +830,44 @@ let houseMesh;
   houseMesh = mergedMesh(P);
 })();
 // Grass: thousands of little tufts drawn in one go, swaying gently in the wind
-const windTime = { value: 0 };
 (function makeGrass() {
   const verts = [], shade = [];
-  for (let i = 0; i < 6; i++) {                       // one tuft = 6 thin blades fanning out
-    const a = i / 6 * Math.PI * 2 + rand(-.3, .3), lean = rand(.08, .25), h = rand(.25, .5), w = .022;
-    const ox = Math.cos(a) * .04, oz = Math.sin(a) * .04, px = -Math.sin(a) * w, pz = Math.cos(a) * w;
-    const tx = ox + Math.cos(a) * lean, tz = oz + Math.sin(a) * lean;
-    verts.push(ox - px, 0, oz - pz, ox + px, 0, oz + pz, tx, h, tz);    // front of the blade
-    verts.push(ox + px, 0, oz + pz, ox - px, 0, oz - pz, tx, h, tz);    // and its back
-    for (let s = 0; s < 2; s++) shade.push(.55, .6, .45, .55, .6, .45, 1.1, 1.1, .92);   // darker root, lighter tip
+  // one tuft = 8 thin blades, each curving outwards and tapering to a point (three segments per blade)
+  for (let i = 0; i < 8; i++) {
+    const a = i / 8 * Math.PI * 2 + rand(-.4, .4), h = rand(.22, .5), lean = rand(.1, .3), w = rand(.012, .02);
+    const dx = Math.cos(a), dz = Math.sin(a), px = -dz, pz = dx, base = rand(0, .05);
+    const pts = [0, .4, .75, 1].map(t => {                   // a point along the blade: it bends further out towards the tip
+      const out = base + lean * t * t, width = w * (1 - t * .85);
+      return { x: dx * out, y: h * t, z: dz * out, w: t === 1 ? 0 : width };
+    });
+    for (let k = 0; k < 3; k++) {
+      const p0 = pts[k], p1 = pts[k + 1], s0 = .5 + k * .22, s1 = .5 + (k + 1) * .22;   // darker at the root
+      verts.push(p0.x - px * p0.w, p0.y, p0.z - pz * p0.w, p0.x + px * p0.w, p0.y, p0.z + pz * p0.w, p1.x + px * p1.w, p1.y, p1.z + pz * p1.w);
+      verts.push(p0.x - px * p0.w, p0.y, p0.z - pz * p0.w, p1.x + px * p1.w, p1.y, p1.z + pz * p1.w, p1.x - px * p1.w, p1.y, p1.z - pz * p1.w);
+      shade.push(s0, s0 * 1.05, s0 * .85, s0, s0 * 1.05, s0 * .85, s1, s1 * 1.05, s1 * .85, s0, s0 * 1.05, s0 * .85, s1, s1 * 1.05, s1 * .85, s1, s1 * 1.05, s1 * .85);
+    }
   }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute("position", new THREE.Float32BufferAttribute(verts, 3));
   geo.setAttribute("color", new THREE.Float32BufferAttribute(shade, 3));
   geo.setAttribute("normal", new THREE.Float32BufferAttribute(verts.map((_, i) => i % 3 === 1 ? 1 : 0), 3));   // lit like the ground
-  const mat = new THREE.MeshLambertMaterial({ vertexColors: true });
+  const mat = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide });
   mat.onBeforeCompile = shader => {                   // bend the blade tips with the wind
     shader.uniforms.windTime = windTime;
+    shader.fragmentShader = shader.fragmentShader.replace(/\(\s*gl_FrontFacing\s*\)\s*\?\s*(\w+)Front\s*:\s*\w+Back/g, "$1Front");   // light both sides of a blade alike
     shader.vertexShader = "uniform float windTime;\n" + shader.vertexShader.replace("#include <begin_vertex>", `#include <begin_vertex>
       vec4 root = instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
       float bend = position.y * position.y;
-      transformed.x += sin(windTime * 1.6 + root.x * .3 + root.z * .2) * .35 * bend;
+      transformed.x += sin(windTime * 1.6 + root.x * .3 + root.z * .2) * .5 * bend;
       transformed.z += cos(windTime * 1.2 + root.z * .25) * .2 * bend;`);
   };
-  const COUNT = 26000;
+  const COUNT = 45000;
   const grass = new THREE.InstancedMesh(geo, mat, COUNT);
-  const green = new THREE.Color(0x5e7a32), yellow = new THREE.Color(0x9a8f52), col = new THREE.Color();
+  const green = new THREE.Color(0x587a30), yellow = new THREE.Color(0x968c50), col = new THREE.Color();
   const m = new THREE.Matrix4(), q = new THREE.Quaternion(), up = new THREE.Vector3(0, 1, 0);
   let n = 0;
   for (let tries = 0; n < COUNT && tries < COUNT * 6; tries++) {
-    const x = rand(-98, 98), z = rand(-73, 73);
+    const x = rand(-WORLD_X + 2, WORLD_X - 2), z = rand(-WORLD_Z + 2, WORLD_Z - 2);
     if (fbm(x * .09, z * .09) < rand(.25, .7)) continue;        // grows in patches
     if (wallGap(x, z) < .5 || track(x, z) > rand(.3, 1)) continue;
     if (craters.some(c => Math.hypot(x - c.x, z - c.z) < c.r * .8) || inRect(x, z, HOUSE, .2) || trenchAt(x, z).d < TRENCH.half + 1.4) continue;
@@ -667,13 +882,44 @@ const windTime = { value: 0 };
   grass.receiveShadow = true;
   scene.add(grass);
 
+  // tall wild grass: long stems with a seed head, in loose clumps
+  {
+    const v = [], c = [];
+    for (let i = 0; i < 5; i++) {
+      const a = rand(0, 6.3), h = rand(.6, .95), lean = rand(.05, .2), dx = Math.cos(a), dz = Math.sin(a), w = .006;
+      const tip = [dx * lean, h, dz * lean];
+      v.push(-w * dz, 0, w * dx, w * dz, 0, -w * dx, tip[0], tip[1], tip[2]);               // stem
+      c.push(.45, .5, .35, .45, .5, .35, .85, .8, .55);
+      const hy = h * .82, hx = dx * lean * .8, hz = dz * lean * .8;                         // seed head: a thin pale spike
+      v.push(hx - .018 * dz, hy, hz + .018 * dx, hx + .018 * dz, hy, hz - .018 * dx, tip[0], tip[1] + .06, tip[2]);
+      c.push(1.1, 1.0, .75, 1.1, 1.0, .75, 1.2, 1.1, .85);
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.Float32BufferAttribute(v, 3));
+    geo.setAttribute("color", new THREE.Float32BufferAttribute(c, 3));
+    geo.setAttribute("normal", new THREE.Float32BufferAttribute(v.map((_, i) => i % 3 === 1 ? 1 : 0), 3));
+    const TALL = 9000, tall = new THREE.InstancedMesh(geo, mat, TALL);
+    const straw = new THREE.Color(0xb5a46a), sage = new THREE.Color(0x8c9a5c);
+    let t = 0;
+    for (let tries = 0; t < TALL && tries < TALL * 8; tries++) {
+      const x = rand(-WORLD_X + 2, WORLD_X - 2), z = rand(-WORLD_Z + 2, WORLD_Z - 2);
+      if (fbm(x * .05 + 3, z * .05) < .55 || wallGap(x, z) < .8 || track(x, z) > .2 || inRect(x, z, HOUSE, .5) || trenchAt(x, z).d < TRENCH.half + 1.5) continue;
+      q.setFromAxisAngle(up, rand(0, 6.3));
+      tall.setMatrixAt(t, m.compose(new THREE.Vector3(x, groundY(x, z), z), q, new THREE.Vector3(1, rand(.7, 1.3), 1)));
+      tall.setColorAt(t, col.copy(sage).lerp(straw, clamp01(dryness(x, z) + rand(-.1, .4))));
+      t++;
+    }
+    tall.count = t; tall.frustumCulled = false; tall.receiveShadow = true;
+    scene.add(tall);
+  }
+
   // wildflowers: mostly red poppies, some yellow and white
-  const FLOWERS = 900;
+  const FLOWERS = 2000;
   const flowers = new THREE.InstancedMesh(new THREE.OctahedronGeometry(.055, 0), new THREE.MeshLambertMaterial(), FLOWERS);
   const petals = [0xb3261e, 0xb3261e, 0xc23a22, 0xd9c043, 0xe8e4d8];
   let f = 0;
   for (let tries = 0; f < FLOWERS && tries < FLOWERS * 10; tries++) {
-    const x = rand(-98, 98), z = rand(-73, 73);
+    const x = rand(-WORLD_X + 2, WORLD_X - 2), z = rand(-WORLD_Z + 2, WORLD_Z - 2);
     if (fbm(x * .09, z * .09) < .5 || wallGap(x, z) < 1 || track(x, z) > .2 || inRect(x, z, HOUSE, 1) || trenchAt(x, z).d < TRENCH.half + 1.8) continue;
     if (craters.some(c => Math.hypot(x - c.x, z - c.z) < c.r * 1.3)) continue;
     flowers.setMatrixAt(f, m.compose(new THREE.Vector3(x, groundY(x, z) + rand(.25, .45), z), q, new THREE.Vector3(1, .6, 1)));
@@ -747,6 +993,7 @@ const casingGeo = new THREE.CylinderGeometry(.011, .011, .065, 8);
 const casingMat = new THREE.MeshPhongMaterial({ color: 0xc9a043, shininess: 80, specular: 0x887744 });
 const casingVel = new THREE.Vector3();
 function ejectCasing(s) {
+  play("bolt", s.x, s.z, { vol: .7 });
   const mesh = new THREE.Mesh(casingGeo, casingMat);
   s.ejectPort.getWorldPosition(mesh.position);
   casingVel.set(rand(.03, .05), rand(.05, .08), rand(-.02, .01)).applyQuaternion(s.group.quaternion);   // out to the side and up
@@ -763,6 +1010,7 @@ function updateCasings() {
     m.rotation.x += c.spin; m.rotation.z += c.spin * .7;
     const floor = groundY(m.position.x, m.position.z) + .012;
     if (m.position.y < floor) {                          // bounce, then settle on its side
+      if (c.vy < -.02) play("casing", m.position.x, m.position.z);
       m.position.y = floor; c.vy = -c.vy * .35; c.vx *= .5; c.vz *= .5; c.spin *= .5;
       if (Math.abs(c.vy) < .01) { c.vy = 0; c.spin = 0; m.rotation.x = Math.PI / 2; }
     }
@@ -804,6 +1052,7 @@ const itemGeos = {
 let grenades = [];
 const grenadeGeo = itemGeos.grenade;
 function throwGrenade(p) {
+  play("throw", p.x, p.z);
   const f = forward(p.yaw), mesh = new THREE.Mesh(grenadeGeo, itemMat);
   const g = { mesh, x: p.x + f.x * .5, y: p.y + 1.7, z: p.z + f.z * .5, vx: f.x * .24 + p.vx * .5, vy: .16, vz: f.z * .24 + p.vz * .5, fuse: GRENADE_FUSE, r: .08 };
   mesh.scale.setScalar(1.6); mesh.castShadow = true; mesh.position.set(g.x, g.y, g.z);
@@ -818,7 +1067,7 @@ function updateGrenades() {
     if (blocked(g.x, nz, g.r, g.y) || groundY(g.x, nz) > g.y + .2) g.vz *= -.4; else g.z = nz;
     g.y += g.vy;
     const floor = supportY(g.x, g.z, g.y + .3) + .05;
-    if (g.y < floor) { g.y = floor; g.vy = Math.abs(g.vy) > .03 ? -g.vy * .3 : 0; g.vx *= .55; g.vz *= .55; }   // bounce, then roll to a stop
+    if (g.y < floor) { if (g.vy < -.04) play("clink", g.x, g.z); g.y = floor; g.vy = Math.abs(g.vy) > .03 ? -g.vy * .3 : 0; g.vx *= .55; g.vz *= .55; }   // bounce, then roll to a stop
     if (g.vy === 0) { g.vx *= .88; g.vz *= .88; }        // rolling through the grass slows it quickly
     g.mesh.position.set(g.x, g.y, g.z);
     g.mesh.rotation.x += Math.hypot(g.vx, g.vz) * 3; g.mesh.rotation.z += g.vx * 2;
@@ -827,6 +1076,7 @@ function updateGrenades() {
   grenades = grenades.filter(g => g.fuse > 0);
 }
 function explode(g) {
+  play("boom", g.x, g.z, { vol: 1.4 });
   scene.remove(g.mesh);
   const at = { x: g.x, z: g.z, y: g.y };
   // anyone close enough, and not behind a wall, gets hurt: less the further away they are
@@ -835,6 +1085,8 @@ function explode(g) {
     if (d > GRENADE_RADIUS || !clearShot(at, v, g.y + .5, (v.y || 0) + 1)) continue;
     const hurt = GRENADE_DAMAGE * (1 - d / GRENADE_RADIUS) * (v.num ? .6 : 1);   // your own grenade hurts you less
     v.hp -= hurt; v.sinceHit = 0; v.lastHit = { blast: true, dx: v.x - g.x, dz: v.z - g.z };
+    bloodPuff(v.x, (v.y || 0) + 1.1, v.z, v.x - g.x, v.z - g.z);
+    if (v.num) v.hurtFlash = 1;
     if (!v.num) { v.uni.emissive.setHex(0x777777); v.flash = 6; }
   }
   for (const p of players) p.shake = Math.max(p.shake || 0, clamp01(1 - Math.hypot(p.x - g.x, p.z - g.z) / 35) * 1.3);
@@ -900,6 +1152,159 @@ function updateHotbar(p) {
     slots[i].querySelector(".count").textContent = it.count === undefined ? "" : it.count;
   });
   document.getElementById("binoc" + p.num).style.opacity = (p.zoom || 0) > .6 ? 1 : 0;
+}
+
+// ---------- SOUND: every sound is made by the browser's audio system, no sound files needed ----------
+const sound = { ctx: null, master: null, muted: false, noise: null };
+try { sound.muted = localStorage.getItem("frontline-muted") === "1"; } catch (e) {}
+function startSound() {              // browsers only allow sound after a click or key press
+  if (sound.ctx) {
+    if (sound.ctx.state !== "running") sound.ctx.resume().then(() => { showSoundState(); if (!sound.muted) play("bolt", undefined, undefined, { vol: .6 }); });
+    return;
+  }
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return;
+  const ctx = sound.ctx = new AC();
+  sound.master = ctx.createGain(); sound.master.gain.value = sound.muted ? 0 : SOUND_VOLUME;
+  const squash = ctx.createDynamicsCompressor();       // keeps lots of gunfire from getting painfully loud
+  sound.master.connect(squash); squash.connect(ctx.destination);
+  const buf = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate), d = buf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;   // white noise, shaped into most sounds below
+  sound.noise = buf;
+  // a gentle wind in the background, rising and falling
+  const wind = ctx.createBufferSource(); wind.buffer = buf; wind.loop = true;
+  const wf = ctx.createBiquadFilter(); wf.type = "lowpass"; wf.frequency.value = 380;
+  const wg = ctx.createGain(); wg.gain.value = .05;
+  const lfo = ctx.createOscillator(), lg = ctx.createGain(); lfo.frequency.value = .07; lg.gain.value = .03;
+  lfo.connect(lg); lg.connect(wg.gain); lfo.start();
+  wind.connect(wf); wf.connect(wg); wg.connect(sound.master); wind.start();
+  ctx.onstatechange = showSoundState;
+  if (ctx.state !== "running") ctx.resume();
+  setTimeout(() => { if (!sound.muted) play("bolt", undefined, undefined, { vol: .6 }); showSoundState(); }, 60);   // a click so you know sound is on
+}
+// any click, tap or key press anywhere switches sound on (and wakes it if the browser paused it)
+for (const ev of ["pointerdown", "keydown", "touchstart"]) window.addEventListener(ev, startSound, true);
+document.addEventListener("visibilitychange", () => { if (!document.hidden && sound.ctx) startSound(); });
+function showSoundState() {          // the little label in the corner of the game
+  const el = document.getElementById("soundState");
+  if (!el) return;
+  const on = sound.ctx && sound.ctx.state === "running";
+  el.textContent = sound.muted ? "SOUND OFF · press M" : on ? "SOUND ON · M to mute" : "CLICK FOR SOUND";
+  el.classList.toggle("off", sound.muted || !on);
+}
+function toggleMute() {
+  sound.muted = !sound.muted;
+  try { localStorage.setItem("frontline-muted", sound.muted ? "1" : "0"); } catch (e) {}
+  if (sound.master) sound.master.gain.setTargetAtTime(sound.muted ? 0 : SOUND_VOLUME, sound.ctx.currentTime, .05);
+  if (!sound.muted) setTimeout(() => play("bolt", undefined, undefined, { vol: .6 }), 80);
+  showSoundState();
+}
+// how loud a sound at (x, z) is for the listener, and how far left or right
+function hearing(x, z) {
+  const near = players.filter(p => p.alive).concat(players)[0];
+  if (x === undefined || !near) return { vol: 1, pan: 0, far: 0 };
+  let best = near;
+  for (const p of players) if (Math.hypot(p.x - x, p.z - z) < Math.hypot(best.x - x, best.z - z)) best = p;
+  const d = Math.hypot(best.x - x, best.z - z);
+  let pan = 0;
+  if (!twoPlayer && d > .5) {
+    const r = rightOf(best.yaw);
+    pan = Math.max(-1, Math.min(1, ((x - best.x) * r.x + (z - best.z) * r.z) / d)) * -.8;
+  }
+  return { vol: 1 / (1 + d / 9), pan, far: clamp01(d / 60) };
+}
+function out(vol, pan) {             // a volume knob and left/right placement, plugged into the speakers
+  const ctx = sound.ctx, g = ctx.createGain(); g.gain.value = vol;
+  if (ctx.createStereoPanner) { const p = ctx.createStereoPanner(); p.pan.value = pan; g.connect(p); p.connect(sound.master); }
+  else g.connect(sound.master);
+  return g;
+}
+// a burst of filtered noise that fades away: the basis of bangs, thuds, rustles and whooshes
+function noiseHit(dest, { start = 0, len = .2, type = "lowpass", freq = 1000, endFreq, q = 1, vol = 1, attack = .002 }) {
+  const ctx = sound.ctx, t = ctx.currentTime + start;
+  const src = ctx.createBufferSource(); src.buffer = sound.noise;
+  const f = ctx.createBiquadFilter(); f.type = type; f.frequency.setValueAtTime(freq, t); f.Q.value = q;
+  if (endFreq) f.frequency.exponentialRampToValueAtTime(endFreq, t + len);
+  const g = ctx.createGain(); g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(vol, t + attack); g.gain.exponentialRampToValueAtTime(.001, t + len);
+  src.connect(f); f.connect(g); g.connect(dest);
+  src.start(t, Math.random() * 1.5); src.stop(t + len + .05);
+}
+function tone(dest, { start = 0, len = .1, freq = 440, endFreq, type = "sine", vol = .3 }) {
+  const ctx = sound.ctx, t = ctx.currentTime + start, o = ctx.createOscillator(), g = ctx.createGain();
+  o.type = type; o.frequency.setValueAtTime(freq, t);
+  if (endFreq) o.frequency.exponentialRampToValueAtTime(endFreq, t + len);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(.001, t + len);
+  o.connect(g); g.connect(dest); o.start(t); o.stop(t + len + .02);
+}
+function play(name, x, z, extra = {}) {
+  if (!sound.ctx || sound.muted) return;
+  const h = hearing(x, z);
+  if (h.vol < .02) return;
+  const o = out(h.vol * (extra.vol ?? 1), h.pan), dull = 1 - h.far * .7;   // far-away sounds lose their sharp edge
+  switch (name) {
+    case "rifle": {                  // a sharp crack, a deep boom, then an echo off the countryside
+      const enemy = extra.enemy;
+      noiseHit(o, { len: .09, type: "highpass", freq: 1400 * dull, vol: 1.1 * dull });
+      noiseHit(o, { len: .35, freq: (enemy ? 700 : 900) * dull, endFreq: 120, vol: 1.3 });
+      tone(o, { len: .18, freq: enemy ? 110 : 130, endFreq: 45, vol: .5 });
+      noiseHit(o, { start: .18 + h.far * .25, len: .9, freq: 420, endFreq: 150, vol: .22, attack: .04 });
+      break;
+    }
+    case "bolt":                     // working the bolt: two metal clacks
+      noiseHit(o, { len: .05, type: "bandpass", freq: 2600, q: 3, vol: .5 });
+      noiseHit(o, { start: .16, len: .06, type: "bandpass", freq: 2000, q: 3, vol: .6 });
+      break;
+    case "casing":                   // brass bouncing on the ground
+      tone(o, { len: .08, freq: 3200 + Math.random() * 800, type: "triangle", vol: .08 });
+      tone(o, { start: .07, len: .06, freq: 2800 + Math.random() * 600, type: "triangle", vol: .05 });
+      break;
+    case "whiz":                     // a bullet passing close by
+      noiseHit(o, { len: .22, type: "bandpass", freq: 3500, endFreq: 1200, q: 4, vol: .7, attack: .03 });
+      break;
+    case "hit":                      // a bullet striking someone
+      noiseHit(o, { len: .12, freq: 500, endFreq: 120, vol: .9 });
+      tone(o, { len: .1, freq: 90, endFreq: 50, vol: .4 });
+      break;
+    case "dirt":                     // a bullet striking the ground or a wall
+      noiseHit(o, { len: .1, type: "bandpass", freq: 900, q: .8, vol: .35 });
+      break;
+    case "reload":                   // clip in, bolt home
+      noiseHit(o, { len: .06, type: "bandpass", freq: 1800, q: 2, vol: .45 });
+      noiseHit(o, { start: .45, len: .05, type: "bandpass", freq: 2400, q: 3, vol: .4 });
+      noiseHit(o, { start: .55, len: .08, type: "bandpass", freq: 1500, q: 2, vol: .55 });
+      break;
+    case "throw":
+      noiseHit(o, { len: .25, type: "bandpass", freq: 700, endFreq: 1800, q: 1.2, vol: .3, attack: .06 });
+      break;
+    case "clink":                    // a grenade bouncing
+      tone(o, { len: .07, freq: 1400 + Math.random() * 300, type: "triangle", vol: .12 });
+      break;
+    case "boom": {                   // a big explosion: a sharp blast, a deep thump and a long rumble
+      noiseHit(o, { len: .25, freq: 3000 * dull, endFreq: 400, vol: 1.6 });
+      noiseHit(o, { len: 1.8, freq: 420, endFreq: 40, vol: 2, attack: .005 });
+      tone(o, { len: .9, freq: 70, endFreq: 25, vol: .9 });
+      noiseHit(o, { start: .2, len: 2.2, freq: 160, endFreq: 40, vol: .6, attack: .3 });
+      break;
+    }
+    case "step":                     // a footstep in grass and dirt
+      noiseHit(o, { len: .09, type: "bandpass", freq: 420 + Math.random() * 200, q: .9, vol: .45 * (extra.run ? 1.4 : 1) });
+      break;
+    case "land":
+      noiseHit(o, { len: .16, freq: 300, endFreq: 90, vol: .55 });
+      break;
+    case "bandage":                  // tearing open the wrapper, then cloth
+      for (let i = 0; i < 4; i++) noiseHit(o, { start: i * .09, len: .08, type: "highpass", freq: 2500, vol: .25 });
+      noiseHit(o, { start: .4, len: .5, type: "bandpass", freq: 1500, q: .7, vol: .15, attack: .1 });
+      break;
+    case "whistle": {                // an officer's whistle at the start of each wave
+      const ctx = sound.ctx, t = ctx.currentTime, osc = ctx.createOscillator(), trill = ctx.createOscillator(), tg = ctx.createGain(), g = ctx.createGain();
+      osc.type = "sine"; osc.frequency.value = 2300; trill.frequency.value = 28; tg.gain.value = 120;
+      trill.connect(tg); tg.connect(osc.frequency);
+      g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(.18, t + .03); g.gain.setValueAtTime(.18, t + .7); g.gain.exponentialRampToValueAtTime(.001, t + .9);
+      osc.connect(g); g.connect(o); osc.start(t); trill.start(t); osc.stop(t + 1); trill.stop(t + 1);
+      break;
+    }
+  }
 }
 
 // ---------- 4) THE SOLDIERS ----------
@@ -1330,7 +1735,7 @@ function makePlayer(num) {
   return {
     num, x: num === 1 ? -10 : 10, z: 0, y: groundY(num === 1 ? -10 : 10, 0), yaw: 0, r: .5, hp: MAX_HP, ammo: MAG_SIZE, reload: 0, cool: 0,
     alive: true, inv: newInventory(), slot: 0, bandaging: 0, zoom: 0, shake: 0, vx: 0, vz: 0, jumpY: 0, vy: 0, land: 0, sinceHit: 0, healing: false, crouched: false, crouchAmt: 0, walk: 0, gait: 0, kick: 0, ...s, bar: makeHealthBar(s.group),
-    cam: new THREE.PerspectiveCamera(65, 1, .1, 200),
+    cam: new THREE.PerspectiveCamera(65, 1, .1, 280),
   };
 }
 function makeEnemy() {
@@ -1364,6 +1769,7 @@ function clearWorld() {
   for (const p of puffs) scene.remove(p.mesh);
   for (const c of casings) scene.remove(c.mesh);
   casings = [];
+  for (const o of [...players, ...fallen]) removeStain(o);
   for (const g of grenades) scene.remove(g.mesh);
   grenades = [];
   players = []; enemies = []; fallen = []; bullets = []; puffs = [];
@@ -1385,14 +1791,16 @@ function startGame(n) {
   document.getElementById("pane2").classList.toggle("split", twoPlayer);
   layoutPanes();
   for (const p of players) buildHotbar(p);
+  showSoundState();
 }
 function nextWave() {
   wave++;
+  setTimeout(() => play("whistle"), 300);
   spawnQueue = 3 + wave * 2;
   spawnTimer = 0;
   waveTimer = 120;
   for (const p of players) {            // fallen soldiers come back, everyone patches up
-    if (!p.alive) { p.alive = true; p.hp = MAX_HP / 2; p.death = null; p.rifleFall = null; p.shownSlot = undefined; p.group.rotation.set(0, 0, 0); p.vx = p.vz = 0; p.jumpY = p.vy = 0; p.y = supportY(p.x, p.z, 99); p.sinceHit = 0; p.crouched = false; }
+    if (!p.alive) { p.alive = true; p.hp = MAX_HP / 2; p.death = null; p.rifleFall = null; removeStain(p); p.shownSlot = undefined; p.group.rotation.set(0, 0, 0); p.vx = p.vz = 0; p.jumpY = p.vy = 0; p.y = supportY(p.x, p.z, 99); p.sinceHit = 0; p.crouched = false; }
     else p.hp = Math.min(MAX_HP, p.hp + MAX_HP / 4);
     if (wave > 1) for (const it of p.inv) if (ITEMS[it.id].perWave) it.count = Math.min(ITEMS[it.id].max, it.count + ITEMS[it.id].perWave);   // resupply
   }
@@ -1465,7 +1873,7 @@ function stepHeight(s, jump) {        // stairs, the upstairs floor, jumping and
   if (jump && grounded) { s.vy = JUMP_POWER; s.land = 0; }
   if (s.vy > 0 || s.y > support + .35) {                  // in the air
     s.y += s.vy; s.vy -= GRAVITY;
-    if (s.y <= support) { s.land = Math.min(1, -s.vy / JUMP_POWER); s.y = support; s.vy = 0; }   // touch down: bend the knees
+    if (s.y <= support) { if (s.num && s.vy < -.05) play("land", s.x, s.z); s.land = Math.min(1, -s.vy / JUMP_POWER); s.y = support; s.vy = 0; }   // touch down: bend the knees
   } else {                                                // on the ground, the stairs or the floor
     if (s.vy < -.03) s.land = Math.min(1, -s.vy / JUMP_POWER);
     s.y = support; s.vy = 0;
@@ -1496,6 +1904,7 @@ function shoot(from, yaw, team, spread, target) {
   mesh.position.set(from.x + f.x * 1.2, h0, from.z + f.z * 1.2);
   from.group.position.set(from.x, from.y || 0, from.z); from.group.rotation.y = from.yaw;   // bring the model up to date
   muzzleFlash(from.muzzle.getWorldPosition(muzzlePos), a);
+  play("rifle", from.x, from.z, { enemy: team === "enemy" });
 }
 
 function updatePlayer(p) {
@@ -1559,15 +1968,15 @@ function updatePlayer(p) {
   p.zoomWant = item.id === "binoculars" && firing;      // binoculars: hold to look through them
   if (item.id === "rifle") {
     const reloadKey = p.num === 1 ? keys.KeyR : keys.ShiftRight;
-    if (reloadKey && p.ammo < MAG_SIZE && !p.reload) p.reload = RELOAD_TIME;
+    if (reloadKey && p.ammo < MAG_SIZE && !p.reload) { p.reload = RELOAD_TIME; play("reload", p.x, p.z); }
     if (firing && p.cool === 0 && !p.reload) {
       if (p.ammo > 0) { shoot(p, p.yaw, "ally", .02); p.ammo--; p.cool = 12; }
-      else p.reload = RELOAD_TIME;
+      else { p.reload = RELOAD_TIME; play("reload", p.x, p.z); }
     }
   } else if (item.id === "grenade") {
     if (pressed && item.count > 0 && p.cool === 0) { throwGrenade(p); item.count--; p.cool = 40; }
   } else if (item.id === "bandage") {
-    if (pressed && item.count > 0 && !p.bandaging && p.hp < MAX_HP) { p.bandaging = BANDAGE_TIME; item.count--; }
+    if (pressed && item.count > 0 && !p.bandaging && p.hp < MAX_HP) { p.bandaging = BANDAGE_TIME; item.count--; play("bandage", p.x, p.z); }
   }
 }
 
@@ -1613,17 +2022,21 @@ function update() {
     b.y = b.h0 + (b.h1 - b.h0) * b.trav / b.reach;      // a straight line from the muzzle towards the target
     b.mesh.position.set(b.x, b.y, b.z);
     if (b.x < MINX || b.x > MAXX || b.z < MINZ || b.z > MAXZ) b.life = 0;
-    if (wallStopsShot(b.x, b.z, b.y)) { b.life = 0; addPuff(b.x, Math.min(b.y, 2.5), b.z, 0xd6c9a0, 18, .06); }   // dust off the wall
-    else if (b.y < groundY(b.x, b.z)) { b.life = 0; addPuff(b.x, groundY(b.x, b.z) + .1, b.z, 0x9a8a6a, 14, .05); }  // kicks up dirt
+    if (wallStopsShot(b.x, b.z, b.y)) { b.life = 0; play("dirt", b.x, b.z); addPuff(b.x, Math.min(b.y, 2.5), b.z, 0xd6c9a0, 18, .06); }   // dust off the wall
+    else if (b.y < groundY(b.x, b.z)) { b.life = 0; play("dirt", b.x, b.z, { vol: .7 }); addPuff(b.x, groundY(b.x, b.z) + .1, b.z, 0x9a8a6a, 14, .05); }  // kicks up dirt
     const victims = b.team === "ally" ? enemies : players.filter(p => p.alive);
+    if (b.team === "enemy" && b.life > 0 && !b.whizzed) for (const p of players)   // a near miss whizzes past your ear
+      if (p.alive && dist(b, p) < 1.8 && dist(b, p) > .6) { b.whizzed = true; play("whiz", b.x, b.z); }
     for (const v of victims) {
       if (b.life > 0 && dist(b, v) < .6 && b.y > (v.y || 0) - .2 && b.y < (v.y || 0) + 2.3) {
         b.life = 0;
+        play("hit", v.x, v.z);
         v.hp -= b.team === "ally" ? 20 : 12;
         v.sinceHit = 0;                                    // getting hit stops recovery for a while
         v.lastHit = { dx: b.vx, dz: b.vz };               // which way the bullet was going (decides how they fall)
         if (v.uni && b.team === "ally") { v.uni.emissive.setHex(0x777777); v.flash = 6; }
-        addPuff(b.x, b.y, b.z, 0xd0c4a4, 10, .04);
+        bloodPuff(b.x, b.y, b.z, b.vx, b.vz);
+        if (v.num) v.hurtFlash = 1;                        // red at the edges of your screen
       }
     }
   }
@@ -1635,8 +2048,8 @@ function update() {
   for (const f of fallen) {                 // the dead lie where they fell for a while, then sink away
     f.fall++;
     animateDeath(f);
-    if (f.fall > 600) f.death.sink += .015;
-    if (f.fall > 680) { scene.remove(f.group); if (f.rifle.parent === scene) scene.remove(f.rifle); }
+    if (f.fall > 600) { f.death.sink += .015; updateStain(f, clamp01((680 - f.fall) / 80)); }
+    if (f.fall > 680) { removeStain(f); scene.remove(f.group); if (f.rifle.parent === scene) scene.remove(f.rifle); }
   }
   fallen = fallen.filter(f => f.fall <= 680);
 
@@ -1670,6 +2083,52 @@ function update() {
 }
 
 // ---------- 6) DRAWING ----------
+// ---------- BLOOD (kept mild): a puff of red mist on a hit, a small stain under the fallen ----------
+function bloodPuff(x, y, z, dx = 0, dz = 0) {
+  const len = Math.hypot(dx, dz) || 1;
+  for (let i = 0; i < 10; i++) {                       // red mist
+    const s = rand(.015, .045);
+    addPuff(x, y + rand(-.15, .15), z, i % 2 ? 0x7a1010 : 0x5c0b0b, rand(14, 24), .05,
+      { vx: dx / len * s + rand(-.012, .012), vy: rand(-.005, .02), vz: dz / len * s + rand(-.012, .012), alpha: .7, size: rand(.16, .3) });
+  }
+  for (let i = 0; i < 5; i++) {                        // a few drops that fall to the ground
+    const s = rand(.02, .06);
+    addPuff(x, y, z, 0x6a0c0c, 60, 0, { vx: dx / len * s + rand(-.02, .02), vy: rand(0, .05), vz: dz / len * s + rand(-.02, .02), alpha: .9, size: rand(.04, .07), gravity: true });
+  }
+  // a small spatter on the ground just behind where they were hit; it fades after a while
+  const gx = x + dx / len * rand(.3, .8), gz = z + dz / len * rand(.3, .8);
+  const spot = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ map: stainTex, transparent: true, depthWrite: false, opacity: .6 }));
+  spot.rotation.set(-Math.PI / 2, 0, rand(0, 6.3)); spot.scale.setScalar(rand(.3, .5)); spot.renderOrder = 1;
+  spot.position.set(gx, supportY(gx, gz, y) + .02, gz); scene.add(spot);
+  puffs.push({ mesh: spot, life: 900, max: 900, grow: 0, vx: 0, vy: 0, vz: 0, alpha: .6 });
+}
+const stainTex = (() => {               // a soft round blot, darker in the middle
+  const c = document.createElement("canvas"); c.width = c.height = 64;
+  const g = c.getContext("2d"), grad = g.createRadialGradient(32, 32, 4, 32, 32, 31);
+  grad.addColorStop(0, "rgba(70,8,8,.85)"); grad.addColorStop(.6, "rgba(60,6,6,.6)"); grad.addColorStop(1, "rgba(50,5,5,0)");
+  g.fillStyle = grad; g.fillRect(0, 0, 64, 64);
+  const t = new THREE.CanvasTexture(c); t.encoding = THREE.sRGBEncoding;
+  return t;
+})();
+function addStain(s) {                  // spreads slowly on the ground beneath someone who has fallen
+  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({ map: stainTex, transparent: true, depthWrite: false, opacity: .75 }));
+  mesh.rotation.set(-Math.PI / 2, 0, rand(0, 6.3));
+  mesh.scale.set(.1, .1, 1); mesh.renderOrder = 1;
+  scene.add(mesh);
+  s.stain = { mesh, size: rand(1.4, 1.9) };
+}
+const stainAt = new THREE.Vector3();
+function updateStain(s, fade) {
+  const st = s.stain;
+  if (!st) return;
+  const at = s.upper.getWorldPosition(stainAt);            // under the body, not the feet
+  st.mesh.position.set(at.x, (s.death ? s.death.baseY : s.group.position.y) + .025, at.z);
+  const k = st.mesh.scale.x + (st.size - st.mesh.scale.x) * .01;   // grows slowly over several seconds
+  st.mesh.scale.set(k, k, 1);
+  if (fade !== undefined) st.mesh.material.opacity = .75 * fade;
+}
+function removeStain(s) { if (s.stain) { scene.remove(s.stain.mesh); s.stain = null; } }
+
 // ---------- DYING: soldiers fall in different, natural ways ----------
 // Each way of falling is a few key poses over time (in game steps, 60 = 1 second); the body moves smoothly between them.
 // pitch: tip forward (+) or back (-) · roll: tip onto the side · twist: turn round · lift: raise off the ground when lying
@@ -1715,6 +2174,7 @@ function startDeath(s, hit = {}) {
   else { type = "spin"; mirror = across > 0 ? 1 : -1; }                           // from the side: spun round that way
   if (Math.random() < .15 && !fly) type = "kneel";
   s.death = { type, mirror, t: 0, ox: 0, oz: 0, oy: 0, sink: 0, fly, baseY: s.y ?? groundY(s.x, s.z) };
+  removeStain(s);
 }
 
 function dropRifle(s) {              // the rifle falls out of his hands
@@ -1759,6 +2219,8 @@ function animateDeath(s) {
   s.group.position.set(x, floor + val("lift") + d.oy - d.sink, z);
   s.group.rotation.set(val("pitch"), s.yaw + val("twist") * m, val("roll") * m);
   if (d.t === 5) dropRifle(s);
+  if (d.t === 40) addStain(s);                             // once they have come to rest
+  updateStain(s);
   // the dropped rifle falls, bounces once and lies flat
   const rf = s.rifleFall;
   if (rf && s.rifle.parent === scene) {
@@ -1788,7 +2250,9 @@ function animateSoldier(s, down) {   // runs once per game step, so it looks the
   const ahead = dx * f.x + dz * f.z, across = dx * r.x + dz * r.z;
   const speed = Math.hypot(dx, dz);
   s.gait += ((down ? 0 : Math.min(1, speed / SPRINT_SPEED)) - s.gait) * .15;   // 0 standing .. 1 sprinting
+  const stepBefore = Math.floor(s.walk / Math.PI);
   s.walk += speed * 1.9;                                 // steps follow distance, so feet don't slide
+  if (s.num && s.jumpY < .05 && Math.floor(s.walk / Math.PI) !== stepBefore) play("step", s.x, s.z, { run: speed > PLAYER_SPEED * 1.1, vol: s.crouched ? .5 : 1 });
   s.breath = (s.breath || 0) + .04;
   s.kick *= .8;
   if (s.eject > 0 && --s.eject === 0) ejectCasing(s);
@@ -1859,7 +2323,7 @@ function placeCamera(p) {
   if (p.shake > .01) { p.cam.position.x += rand(-1, 1) * p.shake * .3; p.cam.position.y += rand(-1, 1) * p.shake * .3; p.shake *= .9; }
   p.cam.lookAt(camLook);
 }
-const menuCam = new THREE.PerspectiveCamera(55, 1, .1, 300);
+const menuCam = new THREE.PerspectiveCamera(55, 1, .1, 450);
 let menuAngle = 0;
 
 function render() {
@@ -1871,8 +2335,9 @@ function render() {
   renderer.setScissorTest(true);
   if (state === "menu" || !players.length) {
     menuAngle += .0015;                               // slow fly-around behind the menu
-    menuCam.position.set(Math.sin(menuAngle) * 45, 22, Math.cos(menuAngle) * 35);
+    menuCam.position.set(Math.sin(menuAngle) * 80, 34, Math.cos(menuAngle) * 60);
     menuCam.lookAt(0, 0, 0);
+    sky.position.copy(menuCam.position);
     menuCam.aspect = w / h; menuCam.updateProjectionMatrix();
     renderer.setViewport(0, 0, w, h); renderer.setScissor(0, 0, w, h);
     renderer.render(scene, menuCam);
@@ -1881,6 +2346,7 @@ function render() {
   const n = players.length;
   players.forEach((p, i) => {
     placeCamera(p);
+    sky.position.copy(p.cam.position);
     const vw = w / n;
     p.cam.aspect = vw / h; p.cam.updateProjectionMatrix();
     renderer.setViewport(i * vw, 0, vw, h); renderer.setScissor(i * vw, 0, vw, h);
@@ -1900,6 +2366,9 @@ function updateHUD() {
     bar.parentElement.classList.toggle("healing", p.healing);   // the bar glows while health is coming back
     document.getElementById("hptext" + p.num).textContent = `${Math.ceil(p.hp)} / ${MAX_HP}`;
     updateHotbar(p);
+    p.hurtFlash = (p.hurtFlash || 0) * .93;               // red flash when hit, and a faint glow while health is low
+    const low = p.alive ? clamp01((.35 - p.hp / MAX_HP) / .35) * .45 : .6;
+    document.getElementById("hurt" + p.num).style.opacity = Math.max(p.hurtFlash * .75, low);
     document.getElementById("ammo" + p.num).textContent = p.reload ? "RELOADING..." : "AMMO " + "▮".repeat(p.ammo) + "▯".repeat(MAG_SIZE - p.ammo);
   });
   document.getElementById("topline").textContent = `WAVE ${wave} · SCORE ${score} · ENEMIES ${enemies.length + spawnQueue}`;
@@ -1939,6 +2408,8 @@ window.addEventListener("wheel", e => {
 }, { passive: false });
 window.addEventListener("keydown", e => {
   if (state === "play" && gameKeys.includes(e.code)) e.preventDefault();
+  startSound();
+  if (e.code === "KeyM") toggleMute();
   if (e.code === "KeyP" && state === "play") paused = !paused;
   keys[e.code] = true;
 });
@@ -1947,6 +2418,7 @@ window.addEventListener("blur", () => { for (const k in keys) keys[k] = false; m
 
 // Mouse aiming: clicking the battlefield "captures" the mouse so moving it turns you
 stage.addEventListener("mousedown", e => {
+  startSound();
   if (state !== "play" || twoPlayer) return;
   if (document.pointerLockElement !== canvas) {
     try { const r = canvas.requestPointerLock(); if (r && r.catch) r.catch(() => {}); } catch (err) { /* arrows still work */ }
@@ -1957,9 +2429,9 @@ document.addEventListener("mousemove", e => {
   if (document.pointerLockElement === canvas && players[0] && !paused) players[0].yaw -= e.movementX * MOUSE_SENSITIVITY;
 });
 
-document.getElementById("btn1").onclick = () => startGame(1);
-document.getElementById("btn2").onclick = () => startGame(2);
-document.getElementById("btnAgain").onclick = () => startGame(twoPlayer ? 2 : 1);
+document.getElementById("btn1").onclick = () => { startSound(); startGame(1); };
+document.getElementById("btn2").onclick = () => { startSound(); startGame(2); };
+document.getElementById("btnAgain").onclick = () => { startSound(); startGame(twoPlayer ? 2 : 1); };
 document.getElementById("btnMenu").onclick = () => {
   clearWorld(); state = "menu";
   document.getElementById("over").hidden = true;

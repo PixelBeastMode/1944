@@ -7,7 +7,7 @@
 //            5 game rules · 6 drawing · 7 controls
 // ============================================================
 
-const BUILD = 36;             // shown on screen, so you can tell the browser loaded the newest version
+const BUILD = 40;             // shown on screen, so you can tell the browser loaded the newest version
 document.querySelector(".tag").textContent += " · build " + BUILD;
 
 // ---------- 1) SETTINGS: change these to tweak the game ----------
@@ -28,12 +28,23 @@ const REGEN_RATE = 0.15;      // health regained per frame while recovering (0.1
 const GRENADE_FUSE = 150;     // frames from throwing a grenade to the bang (60 = 1 second)
 const GRENADE_RADIUS = 6;     // how far a grenade blast reaches
 const GRENADE_DAMAGE = 160;   // damage right next to the blast (less further away)
+const SMOKE_FUSE = 90;        // frames from throwing a smoke grenade until it starts pouring smoke
+const SMOKE_TIME = 1200;      // how long it keeps pouring (60 = 1 second)
+const SMOKE_RADIUS = 5;       // how big the cloud gets
 const BANDAGE_HEAL = 60;      // health one bandage gives back
 const BANDAGE_TIME = 70;      // frames it takes to put a bandage on
 const SOUND_VOLUME = 0.9;      // overall loudness (press M in the game to mute)
 const ALLIES = 10;            // computer-controlled soldiers on your side (topped up each wave)
 const ALLY_HP = 100;
-const EXTRA_ENEMIES = 10;     // extra enemy soldiers added to every wave
+const EXTRA_ENEMIES = 60;     // extra enemy soldiers added to every wave
+const SPAWN_GAP = 15;         // frames between enemies arriving (60 = 1 second)
+const ALLY_TANKS = 2;         // Shermans on your side (replaced each wave if knocked out)
+const ENEMY_TANKS = 2;        // Panzer IVs in the first wave (more come later)
+const TANK_HP = 600;          // rifle bullets barely scratch a tank: use grenades
+const TANK_SPEED = .045;      // map units per frame
+const TANK_RELOAD = 300;      // frames between main gun shots
+const SHELL_POWER = 1.3;      // a tank shell's blast compared with a grenade
+const TANK_ARMOUR_BLAST = 1.8;   // how much blasts hurt tanks
 const MAG_SIZE = 8;
 const RELOAD_TIME = 70;
 const MINX = -80, MAXX = 80, MINZ = -52, MAXZ = 52;   // edges of the battlefield (inside the barbed wire)
@@ -188,7 +199,8 @@ function circleHitsRect(cx, cz, r, w) {
 const insideWall = (x, z) => walls.some(w => x > w.x && x < w.x + w.w && z > w.z && z < w.z + w.d);
 function blocked(x, z, r, y = 0) {  // y = how high the soldier's feet are: walls only block at their own height
   if (x < MINX + r || x > MAXX - r || z < MINZ + r || z > MAXZ - r) return true;
-  return walls.some(w => y < w.top - .25 && y > (w.base || 0) - .6 && circleHitsRect(x, z, r, w));
+  return walls.some(w => y < w.top - .25 && y > (w.base || 0) - .6 && circleHitsRect(x, z, r, w))
+    || tanks.some(t => y < t.y + 2.4 && insideTank(t, x, z, r));
 }
 const tooSteep = (o, x, z) => groundY(x, z) > (o.y ?? 0) + .6;   // a trench wall or other drop too high to step up
 function move(o, dx, dz) {           // slide along walls instead of sticking
@@ -200,7 +212,8 @@ function move(o, dx, dz) {           // slide along walls instead of sticking
 // does a wall stop a shot here? lift = the height of whoever is higher up, the shooter or the target:
 // from up high you fire over low walls, and anyone can fire over a windowsill
 // does something stop a shot flying through (x, z) at height h? walls, windowsills and sandbags only stop it if it is lower than their top
-const wallStopsShot = (x, z, h) => walls.some(w => x > w.x && x < w.x + w.w && z > w.z && z < w.z + w.d && w.top > h && (w.base || 0) < h) || h < parapetTop(x, z);
+const wallStopsShot = (x, z, h, skip, skip2) => walls.some(w => x > w.x && x < w.x + w.w && z > w.z && z < w.z + w.d && w.top > h && (w.base || 0) < h)
+  || h < parapetTop(x, z) || !!tankAt(x, z, h, skip, skip2);
 function steer(o, tx, tz, agility) { // ease towards the wanted speed, so soldiers have a bit of weight
   o.vx += (tx - o.vx) * agility;
   o.vz += (tz - o.vz) * agility;
@@ -211,7 +224,7 @@ function clearShot(a, b, ha = (a.y || 0) + 1.5, hb = (b.y || 0) + (b.crouched ? 
   const steps = Math.ceil(dist(a, b) / 0.3);          // small steps, so thin tree trunks are not skipped
   for (let i = 1; i < steps; i++) {
     const k = i / steps, x = a.x + (b.x - a.x) * k, z = a.z + (b.z - a.z) * k, h = ha + (hb - ha) * k;
-    if (wallStopsShot(x, z, h) || h < groundY(x, z)) return false;
+    if (wallStopsShot(x, z, h, a.tank ? a : null, b.tank ? b : null) || h < groundY(x, z)) return false;
   }
   return true;
 }
@@ -1054,14 +1067,14 @@ function updateCasings() {
   casings = casings.filter(c => c.life > 0);
 }
 
-// ---------- ITEMS: the hotbar (rifle, grenades, bandages, binoculars) ----------
+// ---------- ITEMS: the hotbar (rifle, grenades, bandages, smoke grenades) ----------
 const ITEMS = {
   rifle:      { name: "Rifle" },
   grenade:    { name: "Grenade", start: 3, perWave: 2, max: 5 },
   bandage:    { name: "Bandage", start: 2, perWave: 1, max: 4 },
-  binoculars: { name: "Binoculars" },
+  smoke:      { name: "Smoke grenade", start: 2, perWave: 1, max: 3 },
 };
-const newInventory = () => ["rifle", "grenade", "bandage", "binoculars"].map(id => ({ id, count: ITEMS[id].start }));
+const newInventory = () => ["rifle", "grenade", "bandage", "smoke"].map(id => ({ id, count: ITEMS[id].start }));
 
 // small models of the items, held in the right hand (each built once, then shared)
 const itemMat = new THREE.MeshPhongMaterial({ vertexColors: true, shininess: 20, specular: 0x222222 });
@@ -1076,20 +1089,23 @@ const itemGeos = {
     { geo: new THREE.CylinderGeometry(.03, .03, .075, 14), at: [0, 0, 0], rot: [0, 0, Math.PI / 2], color: 0xe2dac6 },
     { geo: new THREE.CylinderGeometry(.031, .031, .03, 14), at: [-.02, 0, 0], rot: [0, 0, Math.PI / 2], color: 0x9c8a62 },
   ], .05, true),
-  binoculars: mergeParts([                                // two tubes joined by a hinge
-    ...[-.028, .028].map(x => ({ geo: new THREE.CylinderGeometry(.021, .024, .11, 12), at: [x, 0, 0], rot: [Math.PI / 2, 0, 0], color: 0x1d1d1b })),
-    ...[-.028, .028].map(x => ({ geo: new THREE.CylinderGeometry(.018, .018, .012, 12), at: [x, 0, .057], rot: [Math.PI / 2, 0, 0], color: 0x4a5560 })),
-    { geo: new THREE.BoxGeometry(.035, .016, .05), at: [0, 0, -.01], color: 0x2a2a28 },
+  smoke: mergeParts([                                     // a smoke grenade: a painted tin can with a white band and a fuse lever on top
+    { geo: new THREE.CylinderGeometry(.03, .03, .1, 14), at: [0, 0, 0], color: 0x5c6440 },
+    { geo: new THREE.CylinderGeometry(.031, .031, .022, 14), at: [0, .02, 0], color: 0xe6e2d4 },
+    { geo: new THREE.CylinderGeometry(.012, .016, .02, 10), at: [0, .06, 0], color: 0x3a3a34 },
+    { geo: new THREE.BoxGeometry(.01, .07, .012), at: [.03, .025, 0], rot: [0, 0, -.12], color: 0x55583f },
+    { geo: new THREE.TorusGeometry(.012, .002, 4, 10), at: [-.02, .07, 0], color: 0xb39a52 },
   ], .05, true),
 };
 
 // grenades in flight: they bounce, roll to a stop, then explode
 let grenades = [];
 const grenadeGeo = itemGeos.grenade;
-function throwGrenade(p) {
+function throwGrenade(p, kind = "grenade") {
   play("throw", p.x, p.z);
-  const f = forward(p.yaw), mesh = new THREE.Mesh(grenadeGeo, itemMat);
-  const g = { mesh, x: p.x + f.x * .5, y: p.y + 1.7, z: p.z + f.z * .5, vx: f.x * .24 + p.vx * .5, vy: .16, vz: f.z * .24 + p.vz * .5, fuse: GRENADE_FUSE, r: .08 };
+  const f = forward(p.yaw), mesh = new THREE.Mesh(kind === "smoke" ? itemGeos.smoke : grenadeGeo, itemMat);
+  const g = { kind, mesh, x: p.x + f.x * .5, y: p.y + 1.7, z: p.z + f.z * .5, vx: f.x * .24 + p.vx * .5, vy: .16, vz: f.z * .24 + p.vz * .5,
+    fuse: kind === "smoke" ? SMOKE_FUSE : GRENADE_FUSE, r: .08 };
   mesh.scale.setScalar(1.6); mesh.castShadow = true; mesh.position.set(g.x, g.y, g.z);
   scene.add(mesh); grenades.push(g);
   p.kick = 1;
@@ -1106,23 +1122,65 @@ function updateGrenades() {
     if (g.vy === 0) { g.vx *= .88; g.vz *= .88; }        // rolling through the grass slows it quickly
     g.mesh.position.set(g.x, g.y, g.z);
     g.mesh.rotation.x += Math.hypot(g.vx, g.vz) * 3; g.mesh.rotation.z += g.vx * 2;
-    if (--g.fuse <= 0) explode(g);
+    if (--g.fuse <= 0) { if (g.kind === "smoke") startSmoke(g); else explode(g); }
   }
   grenades = grenades.filter(g => g.fuse > 0);
 }
-function explode(g) {
-  play("boom", g.x, g.z, { vol: 1.4 });
-  scene.remove(g.mesh);
-  const at = { x: g.x, z: g.z, y: g.y };
+const softTex = (() => {             // a soft round blob, for smoke
+  const c = document.createElement("canvas"); c.width = c.height = 64;
+  const g = c.getContext("2d"), grad = g.createRadialGradient(32, 32, 2, 32, 32, 31);
+  grad.addColorStop(0, "rgba(255,255,255,1)"); grad.addColorStop(.5, "rgba(255,255,255,.55)"); grad.addColorStop(1, "rgba(255,255,255,0)");
+  g.fillStyle = grad; g.fillRect(0, 0, 64, 64);
+  return new THREE.CanvasTexture(c);
+})();
+let smokes = [];
+function startSmoke(g) {             // the can lies on the ground hissing out smoke
+  smokes.push({ x: g.x, y: g.y, z: g.z, t: 0, r: 0, mesh: g.mesh, drift: rand(0, 6.3) });
+  play("hiss", g.x, g.z);
+}
+function updateSmokes() {
+  for (const c of smokes) {
+    c.t++;
+    const pouring = c.t < SMOKE_TIME, fading = clamp01((SMOKE_TIME + 420 - c.t) / 420);
+    c.r = SMOKE_RADIUS * Math.min(1, c.t / 200) * fading;     // the cloud swells, holds, then thins out
+    const wx = Math.cos(c.drift) * .004, wz = Math.sin(c.drift) * .004;   // a gentle breeze
+    if (pouring && c.t % 3 === 0) {
+      const big = Math.min(1, c.t / 150);
+      addPuff(c.x + rand(-.3, .3), c.y + .3, c.z + rand(-.3, .3), pick([0xdcdcd6, 0xcfcfc8, 0xe8e6e0]), rand(300, 420), .006,
+        { vx: rand(-.02, .02) * (1 + big) + wx, vy: rand(.004, .012), vz: rand(-.02, .02) * (1 + big) + wz, alpha: .55, size: rand(.8, 1.6) * (.6 + big), soft: true });
+    }
+    if (pouring && c.t % 120 === 0) play("hiss", c.x, c.z, { vol: .6 });
+  }
+  for (const c of smokes) if (c.t > SMOKE_TIME + 420) scene.remove(c.mesh);
+  smokes = smokes.filter(c => c.t <= SMOKE_TIME + 420);
+}
+function smokeBlocks(a, b) {         // does a smoke cloud lie between a and b?
+  for (const c of smokes) {
+    if (c.r < .5) continue;
+    const dx = b.x - a.x, dz = b.z - a.z, L2 = dx * dx + dz * dz || 1;
+    const k = clamp01(((c.x - a.x) * dx + (c.z - a.z) * dz) / L2);
+    if (Math.hypot(a.x + dx * k - c.x, a.z + dz * k - c.z) < c.r * .85) return true;
+  }
+  return false;
+}
+function explode(g) { scene.remove(g.mesh); blast(g.x, g.y, g.z, 1); }
+function blast(x, y, z, power) {     // an explosion at (x, y, z); power 1 = a grenade
+  const g = { x, y, z }, R = GRENADE_RADIUS * power;
+  play("boom", x, z, { vol: 1.4 * power });
+  const at = { x, z, y };
   // anyone close enough, and not behind a wall, gets hurt: less the further away they are
   for (const v of [...enemies, ...players.filter(p => p.alive), ...allies]) {
     const d = Math.hypot(v.x - g.x, v.z - g.z, ((v.y || 0) + .9) - g.y);
-    if (d > GRENADE_RADIUS || !clearShot(at, v, g.y + .5, (v.y || 0) + 1)) continue;
-    const hurt = GRENADE_DAMAGE * (1 - d / GRENADE_RADIUS) * (v.num ? .6 : 1);   // your own grenade hurts you less
+    if (d > R || !clearShot(at, v, g.y + .5, (v.y || 0) + 1)) continue;
+    const hurt = GRENADE_DAMAGE * power * (1 - d / R) * (v.num ? .6 : 1);   // your own grenade hurts you less
     v.hp -= hurt; v.sinceHit = 0; v.lastHit = { blast: true, dx: v.x - g.x, dz: v.z - g.z };
     bloodPuff(v.x, (v.y || 0) + 1.1, v.z, v.x - g.x, v.z - g.z);
     if (v.num) v.hurtFlash = 1;
     if (!v.num) { v.uni.emissive.setHex(0x777777); v.flash = 6; }
+  }
+  for (const t of tanks) {            // tanks shrug off a distant blast, but one right beside them does real damage
+    const d = Math.max(0, Math.hypot(t.x - x, t.z - z) - 1.5);
+    if (!t.dead && d < R) t.hp -= GRENADE_DAMAGE * power * TANK_ARMOUR_BLAST * (1 - d / R);
   }
   for (const p of players) p.shake = Math.max(p.shake || 0, clamp01(1 - Math.hypot(p.x - g.x, p.z - g.z) / 35) * 1.3);
   // a big flash of light that lights up everything around
@@ -1172,7 +1230,7 @@ const ICONS = {
   rifle: '<svg viewBox="0 0 48 48"><path d="M3 27h7l3-3h17v-3h13v4h2v3H31l-2 2h-6l-2 4h-5l1-4h-4l-3 4H3z" fill="currentColor"/></svg>',
   grenade: '<svg viewBox="0 0 48 48"><ellipse cx="22" cy="28" rx="11" ry="14" fill="currentColor"/><path d="M14 22h16M13 28h18M14 34h16M18 15v26M26 15v26" stroke="#141510" stroke-width="1.6"/><path d="M27 13l9 18" stroke="currentColor" stroke-width="3"/><circle cx="17" cy="11" r="4" fill="none" stroke="currentColor" stroke-width="2"/></svg>',
   bandage: '<svg viewBox="0 0 48 48"><rect x="8" y="14" width="32" height="20" rx="4" fill="currentColor"/><path d="M24 18v12M18 24h12" stroke="#b33" stroke-width="4"/></svg>',
-  binoculars: '<svg viewBox="0 0 48 48"><circle cx="15" cy="29" r="9" fill="currentColor"/><circle cx="33" cy="29" r="9" fill="currentColor"/><rect x="11" y="12" width="8" height="14" fill="currentColor"/><rect x="29" y="12" width="8" height="14" fill="currentColor"/><rect x="19" y="20" width="10" height="5" fill="currentColor"/><circle cx="15" cy="29" r="4" fill="#141510"/><circle cx="33" cy="29" r="4" fill="#141510"/></svg>',
+  smoke: '<svg viewBox="0 0 48 48"><circle cx="17" cy="14" r="7" fill="currentColor" opacity=".5"/><circle cx="27" cy="10" r="8" fill="currentColor" opacity=".45"/><circle cx="35" cy="17" r="6" fill="currentColor" opacity=".4"/><rect x="15" y="22" width="16" height="22" rx="2" fill="currentColor"/><rect x="15" y="27" width="16" height="4" fill="#141510"/><path d="M31 23l5 12" stroke="currentColor" stroke-width="3"/></svg>',
 };
 function buildHotbar(p) {
   const bar = document.getElementById("hotbar" + p.num);
@@ -1186,7 +1244,6 @@ function updateHotbar(p) {
     slots[i].classList.toggle("empty", it.count === 0);
     slots[i].querySelector(".count").textContent = it.count === undefined ? "" : it.count;
   });
-  document.getElementById("binoc" + p.num).style.opacity = (p.zoom || 0) > .6 ? 1 : 0;
 }
 
 // ---------- SOUND: every sound is made by the browser's audio system, no sound files needed ----------
@@ -1321,6 +1378,25 @@ function play(name, x, z, extra = {}) {
       noiseHit(o, { start: .2, len: 2.2, freq: 160, endFreq: 40, vol: .6, attack: .3 });
       break;
     }
+    case "cannon": {                 // a tank's main gun: a huge crack and a deep boom
+      noiseHit(o, { len: .15, type: "highpass", freq: 900 * dull, vol: 1.6 * dull });
+      noiseHit(o, { len: 1.2, freq: 600 * dull, endFreq: 60, vol: 2 });
+      tone(o, { len: .6, freq: 80, endFreq: 30, vol: .9 });
+      noiseHit(o, { start: .25 + h.far * .3, len: 1.4, freq: 300, endFreq: 80, vol: .35, attack: .05 });
+      break;
+    }
+    case "mg":                       // one round of a machine gun burst
+      noiseHit(o, { len: .06, type: "highpass", freq: 1600 * dull, vol: .6 * dull });
+      noiseHit(o, { len: .14, freq: 800 * dull, endFreq: 150, vol: .7 });
+      break;
+    case "clang":                    // a bullet bouncing off armour plate
+      tone(o, { len: .25, freq: 1900 + Math.random() * 600, type: "triangle", vol: .18 });
+      noiseHit(o, { len: .05, type: "highpass", freq: 3000, vol: .3 });
+      break;
+    case "hiss":                     // a smoke grenade pouring out smoke
+      noiseHit(o, { len: 2.2, type: "highpass", freq: 3200, vol: .18, attack: .15 });
+      noiseHit(o, { len: 2.2, type: "bandpass", freq: 1200, q: .6, vol: .08, attack: .2 });
+      break;
     case "step":                     // a footstep in grass and dirt
       noiseHit(o, { len: .09, type: "bandpass", freq: 420 + Math.random() * 200, q: .9, vol: .45 * (extra.run ? 1.4 : 1) });
       break;
@@ -1340,6 +1416,308 @@ function play(name, x, z, extra = {}) {
       break;
     }
   }
+}
+
+// ---------- TANKS: M4 Sherman for your side, Panzer IV for the Germans ----------
+// Each tank is built from boxes, cylinders and sloped plates, glued into a hull and a turret that turns.
+const tankMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: .8, metalness: .25 });
+const tankGeos = {};
+function slab(w, h, d, frontSlope = 0, backSlope = 0) {    // a box whose top front and/or back edge is cut back at an angle
+  const g = new THREE.BoxGeometry(w, h, d, 1, 1, 1), p = g.attributes.position;
+  for (let i = 0; i < p.count; i++) if (p.getY(i) > 0) p.setZ(i, p.getZ(i) > 0 ? p.getZ(i) - frontSlope : p.getZ(i) + backSlope);
+  g.computeVertexNormals();
+  return g;
+}
+const wheelGeo = (r, w) => new THREE.CylinderGeometry(r, r, w, 16).rotateZ(Math.PI / 2);
+function trackParts(P, side, len, wheels, wheelR, color, rubber, steel) {   // tracks, road wheels, sprocket and idler on one side
+  const x = side * 1.12, n = wheels.length;
+  P.push({ geo: new THREE.BoxGeometry(.5, .07, len - .55), at: [x, .07, 0], color });                 // bottom run
+  P.push({ geo: new THREE.BoxGeometry(.5, .07, len - .4), at: [x, 1.0, -.05], color });               // top run
+  for (const z of [len / 2 - .32, -len / 2 + .3]) {
+    P.push({ geo: wheelGeo(.46, .5), at: [x, .52, z], color });                                        // track wrapped round sprocket and idler
+    P.push({ geo: wheelGeo(.3, .54), at: [x, .52, z], color: steel });
+  }
+  for (let i = 0; i < n; i++) {
+    P.push({ geo: wheelGeo(wheelR, .22), at: [x + side * .1, wheelR + .07, wheels[i]], color: rubber });   // road wheels
+    P.push({ geo: wheelGeo(wheelR * .6, .26), at: [x + side * .1, wheelR + .07, wheels[i]], color: steel });
+  }
+  for (let i = 0; i < len / .18; i++) P.push({ geo: new THREE.BoxGeometry(.52, .04, .05), at: [x, .02, -len / 2 + .3 + i * .18], color: rubber });   // track links
+}
+function star(r) {                    // the white Allied star
+  const s = new THREE.Shape();
+  for (let i = 0; i < 10; i++) { const a = i / 10 * Math.PI * 2 - Math.PI / 2, rr = i % 2 ? r * .4 : r; s[i ? "lineTo" : "moveTo"](Math.cos(a) * rr, Math.sin(a) * rr); }
+  return new THREE.ShapeGeometry(s);
+}
+function shermanGeometry() {
+  const OD = 0x5a6236, dark = 0x3c4126, steel = 0x3a3a34, rubber = 0x1b1a18, white = 0xe8e6dc;
+  const H = [], T = [], G = [];
+  trackParts(H, -1, 5.6, [-1.75, -1.25, -.25, .25, 1.25, 1.75], .3, 0x2e2d29, rubber, steel);
+  trackParts(H, 1, 5.6, [-1.75, -1.25, -.25, .25, 1.25, 1.75], .3, 0x2e2d29, rubber, steel);
+  for (const sx of [-1, 1]) for (const z of [-1.5, 0, 1.5]) H.push({ geo: new THREE.BoxGeometry(.2, .4, .5), at: [sx * 1.17, .5, z], color: dark });   // suspension bogies
+  H.push({ geo: slab(2.1, .5, 5.5), at: [0, .65, 0], color: OD });                                    // lower hull
+  H.push({ geo: slab(2.6, .95, 5.0, 1.55, .25), at: [0, 1.38, -.1], color: OD });                      // upper hull with the sloped front
+  H.push({ geo: new THREE.CylinderGeometry(.35, .5, 2.4, 16, 1, false, 0, Math.PI).rotateZ(Math.PI / 2).rotateY(Math.PI / 2), at: [0, .9, 2.55], color: OD });   // rounded nose
+  for (const sx of [-.5, .5]) H.push({ geo: new THREE.BoxGeometry(.6, .12, .7), at: [sx, 1.86, .3], color: dark });   // driver hatches
+  H.push({ geo: new THREE.CylinderGeometry(.06, .06, .45, 8).rotateX(Math.PI / 2 - .3), at: [.55, 1.45, 2.05], color: steel });   // bow machine gun
+  H.push({ geo: new THREE.BoxGeometry(2.4, .1, 1.2), at: [0, 1.88, -2.0], color: dark });                // engine deck
+  H.push({ geo: new THREE.BoxGeometry(.25, .25, .9), at: [-.85, 1.95, -2.1], color: steel });            // tools stowed on the back
+  for (const sx of [-1, 1]) H.push({ geo: star(.38), at: [sx * 1.305, 1.38, -.6], rot: [0, sx * Math.PI / 2, 0], color: white });   // stars on the sides
+  // turret: a rounded casting with a gun mantlet in front
+  T.push({ geo: new THREE.SphereGeometry(1, 20, 10, 0, Math.PI * 2, 0, Math.PI / 2).scale(1.05, .75, 1.2), at: [0, 0, -.05], color: OD });
+  T.push({ geo: new THREE.CylinderGeometry(1.05, 1.1, .25, 20).scale(1, 1, 1.14), at: [0, .1, -.05], color: OD });
+  T.push({ geo: new THREE.BoxGeometry(.9, .55, .35), at: [0, .35, 1.25], color: OD });                 // mantlet
+  T.push({ geo: new THREE.CylinderGeometry(.32, .36, .28, 16), at: [-.38, .8, -.35], color: dark });   // commander's hatch
+  T.push({ geo: new THREE.CylinderGeometry(.03, .03, .9, 6).rotateX(Math.PI / 2), at: [-.38, 1.05, .05], color: steel });   // machine gun on the roof
+  T.push({ geo: star(.3), at: [0, .45, -1.3], rot: [0, Math.PI, 0], color: white });
+  G.push({ geo: new THREE.CylinderGeometry(.07, .085, 2.5, 12).rotateX(Math.PI / 2), at: [0, 0, 1.25], color: OD });   // 75 mm gun
+  G.push({ geo: new THREE.CylinderGeometry(.1, .1, .25, 12).rotateX(Math.PI / 2), at: [0, 0, 2.45], color: dark });
+  return { hull: mergeParts(H, .1, true), turret: mergeParts(T, .1, true), gun: mergeParts(G, .06, true), turretY: 1.95, gunAt: [0, .35, 1.4], gunLen: 2.6, half: [1.4, 2.95] };
+}
+function panzerGeometry() {
+  const tan = 0xb39d63, dark = 0x55503d, steel = 0x3a3a34, rubber = 0x1b1a18;
+  const H = [], T = [], G = [];
+  const wheels = []; for (let i = 0; i < 8; i++) wheels.push(-1.95 + i * .55);
+  trackParts(H, -1, 5.7, wheels, .24, 0x2e2d29, rubber, steel);
+  trackParts(H, 1, 5.7, wheels, .24, 0x2e2d29, rubber, steel);
+  H.push({ geo: slab(2.0, .55, 5.6), at: [0, .7, 0], color: tan, fabric: 9 });                         // lower hull
+  H.push({ geo: slab(2.85, .7, 5.0, .2, 0), at: [0, 1.32, -.25], color: tan, fabric: 9 });              // boxy superstructure
+  H.push({ geo: slab(2.0, .5, .7, .45, 0), at: [0, .95, 2.75], color: tan, fabric: 9 });               // front plate
+  H.push({ geo: new THREE.BoxGeometry(.5, .2, .25), at: [-.55, 1.5, 2.0], color: dark });                // driver's visor
+  H.push({ geo: new THREE.CylinderGeometry(.05, .05, .3, 8).rotateX(Math.PI / 2), at: [.55, 1.45, 2.12], color: steel });   // hull machine gun
+  for (const sx of [-1, 1]) {
+    H.push({ geo: new THREE.BoxGeometry(.04, .95, 4.6), at: [sx * 1.5, 1.05, -.2], rot: [0, 0, sx * -.08], color: tan, fabric: 9 });   // side armour skirts
+    // the black cross with a white border
+    H.push({ geo: new THREE.BoxGeometry(.02, .62, .2), at: [sx * 1.53, 1.1, -.4], color: 0xeeeeea }); H.push({ geo: new THREE.BoxGeometry(.02, .2, .62), at: [sx * 1.53, 1.1, -.4], color: 0xeeeeea });
+    H.push({ geo: new THREE.BoxGeometry(.03, .5, .1), at: [sx * 1.535, 1.1, -.4], color: 0x111111 }); H.push({ geo: new THREE.BoxGeometry(.03, .1, .5), at: [sx * 1.535, 1.1, -.4], color: 0x111111 });
+  }
+  H.push({ geo: new THREE.BoxGeometry(2.6, .12, 1.4), at: [0, 1.72, -2.0], color: dark });               // engine deck
+  H.push({ geo: new THREE.CylinderGeometry(.12, .12, .6, 10).rotateZ(Math.PI / 2), at: [.6, 1.3, -2.85], color: steel });   // exhaust muffler
+  // turret: flat-sided with sloped faces, a cupola at the back and armour plates around it
+  T.push({ geo: slab(1.9, .75, 2.4, .35, .2), at: [0, .38, -.15], color: tan, fabric: 9 });
+  T.push({ geo: new THREE.CylinderGeometry(.34, .36, .3, 16), at: [0, .9, -.9], color: tan, fabric: 9 });   // commander's cupola
+  for (const sx of [-1, 1]) T.push({ geo: new THREE.BoxGeometry(.04, .6, 2.6), at: [sx * 1.25, .35, -.35], color: tan, fabric: 9 });   // turret skirts
+  T.push({ geo: new THREE.BoxGeometry(.75, .45, .3), at: [0, .35, 1.12], color: tan, fabric: 9 });      // mantlet
+  T.push({ geo: new THREE.BoxGeometry(.02, .3, .3), at: [1.28, .4, -.4], color: 0x111111 });             // turret number plate
+  G.push({ geo: new THREE.CylinderGeometry(.06, .08, 3.3, 12).rotateX(Math.PI / 2), at: [0, 0, 1.65], color: tan, fabric: 9 });   // long 75 mm gun
+  G.push({ geo: new THREE.CylinderGeometry(.12, .12, .3, 12).rotateX(Math.PI / 2), at: [0, 0, 3.35], color: dark });              // muzzle brake
+  const camo = geo => {              // dark yellow with green and brown patches
+    const p = geo.attributes.position, c = geo.attributes.color, f = geo.attributes.fabric, col = new THREE.Color();
+    const green = new THREE.Color(0x4c5631), brown = new THREE.Color(0x6a4a2e);
+    for (let i = 0; i < p.count; i++) {
+      if (f.array[i] !== 9) continue;
+      const n = noise2(p.getX(i) * 1.3 + p.getY(i) * .7, p.getZ(i) * .9), m = noise2(p.getZ(i) * 1.1 + 4, p.getX(i) * 1.2 + p.getY(i));
+      col.fromArray(c.array, i * 3);
+      if (n > .62) col.lerp(green, .85); else if (m > .66) col.lerp(brown, .8);
+      col.toArray(c.array, i * 3);
+    }
+    return geo;
+  };
+  return { hull: camo(mergeParts(H, .1, true)), turret: camo(mergeParts(T, .1, true)), gun: camo(mergeParts(G, .06, true)), turretY: 1.72, gunAt: [0, .38, 1.25], gunLen: 3.5, half: [1.5, 2.95] };
+}
+
+let tanks = [], shells = [];
+function makeTank(side, x, z, yaw) {
+  const kind = side === "ally" ? "sherman" : "panzer";
+  const geo = tankGeos[kind] || (tankGeos[kind] = kind === "sherman" ? shermanGeometry() : panzerGeometry());
+  const mat = tankMat.clone();
+  const group = new THREE.Group(); group.rotation.order = "YXZ";
+  const add = (g, parent) => { const m = new THREE.Mesh(g, mat); m.castShadow = m.receiveShadow = true; parent.add(m); return m; };
+  add(geo.hull, group);
+  const turret = new THREE.Group(); turret.position.y = geo.turretY; group.add(turret);
+  add(geo.turret, turret);
+  const gunPivot = new THREE.Group(); gunPivot.position.set(...geo.gunAt); turret.add(gunPivot);
+  const gun = add(geo.gun, gunPivot);
+  const muzzle = new THREE.Object3D(); muzzle.position.set(0, 0, geo.gunLen); gunPivot.add(muzzle);
+  const mgPort = new THREE.Object3D(); mgPort.position.set(.45, 0, 1.0); gunPivot.add(mgPort);   // machine gun beside the main gun
+  scene.add(group);
+  const t = { tank: true, side, kind, x, z, y: groundY(x, z), yaw, turret: 0, speed: 0, hp: TANK_HP, maxHp: TANK_HP, reload: rand(60, 200), mgCool: 0, burst: 0,
+    stuck: 0, reverse: 0, dead: false, burn: 0, group, turretGroup: turret, gun, muzzle, mgPort, half: geo.half, mat, r: 2.6 };
+  t.bar = makeHealthBar(group); t.bar.back.scale.set(2.4, .2, 1); t.bar.back.position.y = t.bar.fill.position.y = 3.6;
+  placeTank(t);
+  return t;
+}
+// is (x, z) inside a tank's outline (grown by r)?
+function insideTank(t, x, z, r = 0) {
+  const f = forward(t.yaw), rt = rightOf(t.yaw), dx = x - t.x, dz = z - t.z;
+  return Math.abs(dx * f.x + dz * f.z) < t.half[1] + r && Math.abs(dx * rt.x + dz * rt.z) < t.half[0] + r;
+}
+const tankAt = (x, z, h, skip, skip2) => tanks.find(t => t !== skip && t !== skip2 && h < t.y + 2.6 && insideTank(t, x, z));
+function placeTank(t) {              // sit the tank on the ground, tilted to follow the slope
+  const f = forward(t.yaw), rt = rightOf(t.yaw);
+  const at = (a, s) => groundY(t.x + f.x * a + rt.x * s, t.z + f.z * a + rt.z * s, true);
+  const front = Math.max(at(2.4, 0), at(2.4, 1), at(2.4, -1)), back = Math.max(at(-2.4, 0), at(-2.4, 1), at(-2.4, -1));
+  const left = Math.max(at(0, -1.1), at(1.5, -1.1), at(-1.5, -1.1)), right = Math.max(at(0, 1.1), at(1.5, 1.1), at(-1.5, 1.1));
+  t.y = Math.max((front + back) / 2, (left + right) / 2) - .02;          // tracks bridge dips such as trenches
+  t.group.position.set(t.x, t.y, t.z);
+  t.group.rotation.set(-Math.atan2(front - back, 4.8), t.yaw, Math.atan2(left - right, 2.2) * -1);
+  t.turretGroup.rotation.y = t.turret;
+}
+function tankFits(t, x, z, yaw) {    // can the tank be here without hitting a wall, a tree, the house or another tank?
+  if (x < MINX + 3 || x > MAXX - 3 || z < MINZ + 3 || z > MAXZ - 3) return false;
+  const f = forward(yaw), rt = rightOf(yaw);
+  for (const a of [-2.9, -1.4, 0, 1.4, 2.9]) for (const s of [-1.35, 0, 1.35]) {
+    if (blockedByWall(x + f.x * a + rt.x * s, z + f.z * a + rt.z * s)) return false;
+  }
+  return !tanks.some(o => o !== t && Math.hypot(o.x - x, o.z - z) < 5.6);
+}
+const blockedByWall = (x, z) => walls.some(w => w.top > .5 && circleHitsRect(x, z, .2, w));
+
+function tankTargets(t) {            // the enemies of this tank: soldiers and tanks of the other side
+  const foes = t.side === "ally" ? [...enemies] : [...players.filter(p => p.alive), ...allies];
+  return foes.concat(tanks.filter(o => !o.dead && o.side !== t.side));
+}
+function updateTank(t) {
+  if (t.dead) { burnWreck(t); return; }
+  if (t.flash > 0 && --t.flash === 0) t.mat.emissive.setHex(0);
+  let target = null, best = 1e9;
+  for (const o of tankTargets(t)) {
+    const d = dist(t, o) - (o.tank ? 30 : 0);              // enemy tanks matter most
+    if (d < best) { best = d; target = o; }
+  }
+  const lead = players.find(p => p.alive) || players[0];
+  let gx, gz, keep = 22;
+  if (t.side === "ally" && (!target || dist(t, lead) > 45)) { gx = lead.x - 10; gz = lead.z + (t.slot || 0); keep = 4; }   // stay near you
+  else if (target) { gx = target.x; gz = target.z; keep = target.tank ? 30 : 20; }
+  else { gx = t.x; gz = t.z; }
+  // driving: turn the hull towards where it wants to be, then go forwards (or back off if too close)
+  const want = Math.atan2(gx - t.x, gz - t.z), dg = Math.hypot(gx - t.x, gz - t.z);
+  let diff = Math.atan2(Math.sin(want - t.yaw), Math.cos(want - t.yaw));
+  let go = dg > keep + 4 ? TANK_SPEED : dg < keep - 8 ? -TANK_SPEED * .6 : 0;
+  if (t.reverse > 0) { t.reverse--; go = -TANK_SPEED * .7; diff = t.turnAway; }
+  if (Math.abs(diff) > .5 && go > 0) go *= .3;                // slow down to turn
+  t.speed += (go - t.speed) * .05;
+  const ny = t.yaw + Math.max(-.012, Math.min(.012, diff)) * (Math.abs(t.speed) > .005 || Math.abs(diff) > .1 ? 1 : 0);
+  const f = forward(ny), nx = t.x + f.x * t.speed, nz = t.z + f.z * t.speed;
+  const soldierInWay = [...players, ...allies, ...enemies].some(s => s.alive !== false && Math.hypot(s.x - nx, s.z - nz) < 4 && insideTank({ ...t, x: nx, z: nz, yaw: ny }, s.x, s.z, .4) && !insideTank(t, s.x, s.z, .2));
+  if (!soldierInWay && tankFits(t, nx, nz, ny)) { t.x = nx; t.z = nz; t.yaw = ny; t.stuck = 0; }
+  else { t.speed = 0; if (++t.stuck > 40 && !soldierInWay) { t.reverse = 90; t.turnAway = Math.random() < .5 ? 1 : -1; t.stuck = 0; } }
+  placeTank(t);
+  if (Math.abs(t.speed) > .01 && Math.random() < .3) {          // exhaust smoke and dust from the tracks
+    const b = forward(t.yaw);
+    addPuff(t.x - b.x * 3, t.y + 1.4, t.z - b.z * 3, 0x4a4640, rand(40, 70), .03, { vy: .02, alpha: .3, size: .4 });
+    addPuff(t.x - b.x * 2.5 + rand(-1.2, 1.2), t.y + .3, t.z - b.z * 2.5, 0xb3a684, rand(30, 50), .03, { vy: .01, alpha: .25, size: .5 });
+  }
+  if (!target) return;
+  // the turret swings round to the target; fire the main gun when it is lined up
+  const d = dist(t, target);
+  const aim = Math.atan2(target.x - t.x, target.z - t.z) - t.yaw;
+  const td = Math.atan2(Math.sin(aim - t.turret), Math.cos(aim - t.turret));
+  t.turret += Math.max(-.02, Math.min(.02, td));
+  const sees = d < 95 && tankSees(t, target);
+  if (--t.reload <= 0 && sees && Math.abs(td) < .05) { fireShell(t, target); t.reload = TANK_RELOAD + rand(-40, 60); }
+  // machine gun bursts at soldiers that are close enough
+  if (!target.tank && sees && d < 45 && Math.abs(td) < .25) {
+    if (t.burst <= 0 && --t.mgCool <= 0) { t.burst = 8; t.mgCool = rand(60, 120); }
+    if (t.burst > 0 && t.burst-- % 2 === 0) tankBullet(t, target);
+  }
+}
+function tankSees(t, target) {
+  if (t.seeTarget !== target || --t.seeTimer <= 0) {
+    t.seeTarget = target; t.seeTimer = 10;
+    t.sees = clearShot(t, target, t.y + 2.3, (target.y || 0) + (target.tank ? 1.6 : target.crouched ? .85 : 1.25)) && !smokeBlocks(t, target);
+  }
+  return t.sees;
+}
+const tmpV = new THREE.Vector3();
+function fireShell(t, target) {
+  const from = t.muzzle.getWorldPosition(new THREE.Vector3()), yaw = t.yaw + t.turret + rand(-.012, .012), f = forward(yaw);
+  const reach = Math.max(2, Math.hypot(target.x - from.x, target.z - from.z));
+  const h1 = (target.y || 0) + (target.tank ? 1.4 : 1);
+  const mesh = new THREE.Mesh(new THREE.SphereGeometry(.12, 8, 6), new THREE.MeshBasicMaterial({ color: 0xffd080 }));
+  mesh.position.copy(from); scene.add(mesh);
+  shells.push({ x: from.x, z: from.z, y: from.y, h0: from.y, h1, reach, trav: 0, vx: f.x, vz: f.z, owner: t, mesh, life: 120 });
+  t.gun.position.z = -.5;                                    // recoil
+  muzzleFlash(from, yaw); muzzleFlash(from, yaw);
+  for (let i = 0; i < 6; i++) addPuff(from.x + rand(-.5, .5), from.y + rand(-.2, .4), from.z + rand(-.5, .5), 0x8a8478, rand(50, 90), .03, { vy: .01, alpha: .45, size: rand(.6, 1) });
+  play("cannon", from.x, from.z);
+  for (const p of players) p.shake = Math.max(p.shake || 0, clamp01(1 - Math.hypot(p.x - from.x, p.z - from.z) / 25) * .5);
+}
+function tankBullet(t, target) {
+  const from = t.mgPort.getWorldPosition(new THREE.Vector3()), yaw = t.yaw + t.turret + rand(-.05, .05), f = forward(yaw);
+  const reach = Math.max(1, Math.hypot(target.x - from.x, target.z - from.z)), h1 = (target.y || 0) + (target.crouched ? .85 : 1.2);
+  const team = t.side, mesh = new THREE.Mesh(bulletGeo, team === "ally" ? allyTracer : enemyTracer);
+  mesh.rotation.order = "YXZ"; mesh.rotation.set(-Math.atan2(h1 - from.y, reach), yaw, 0); mesh.position.copy(from); scene.add(mesh);
+  bullets.push({ x: from.x, z: from.z, y: from.y, h0: from.y, h1, reach, trav: 0, lift: 0, vx: f.x * BULLET_SPEED, vz: f.z * BULLET_SPEED, team, life: 60, mesh, owner: t });
+  addPuff(from.x, from.y, from.z, 0xffd27a, 3, 0, { alpha: .9, size: .25, glow: true });
+  play("mg", from.x, from.z);
+}
+function updateShells() {
+  for (const s of shells) {
+    for (let k = 0; k < 4 && s.life > 0; k++) {              // small steps, so nothing is skipped at this speed
+      s.x += s.vx * .7; s.z += s.vz * .7; s.trav += .7;
+      s.y = s.h0 + (s.h1 - s.h0) * s.trav / s.reach;
+      const hitSoldier = [...players.filter(p => p.alive), ...allies, ...enemies].some(v => Math.hypot(v.x - s.x, v.z - s.z) < .7 && s.y > (v.y || 0) && s.y < (v.y || 0) + 2);
+      if (s.x < MINX - 5 || s.x > MAXX + 5 || s.z < MINZ - 5 || s.z > MAXZ + 5 || hitSoldier || tankAt(s.x, s.z, s.y, s.owner)
+        || wallStopsShot(s.x, s.z, s.y, s.owner) || s.y < groundY(s.x, s.z) + .05 || s.trav > s.reach + 40) {
+        s.life = 0; blast(s.x, Math.max(s.y, groundY(s.x, s.z)), s.z, SHELL_POWER);
+      }
+    }
+    s.mesh.position.set(s.x, s.y, s.z);
+    if (--s.life <= 0) scene.remove(s.mesh);
+  }
+  shells = shells.filter(s => s.life > 0);
+}
+function knockOut(t) {               // the tank is destroyed: it stops, blackens and burns
+  t.dead = true; t.burn = 0; t.speed = 0;
+  t.mat.color.setHex(0x3a3632); t.mat.emissive.setHex(0); t.mat.roughness = 1; t.mat.metalness = 0;
+  t.turret += rand(-.4, .4); t.turretGroup.position.y += .05; t.turretGroup.rotation.z = rand(-.08, .08);
+  t.gun.parent.rotation.x = rand(.05, .2);                   // the gun droops
+  t.bar.back.visible = t.bar.fill.visible = false;
+  blast(t.x, t.y + 1.5, t.z, 1.2);
+  if (t.side === "enemy") score += 500;
+}
+function burnWreck(t) {              // flames for a while, then a column of smoke
+  t.burn++;
+  if (t.burn < 1500 && Math.random() < .5) addPuff(t.x + rand(-.8, .8), t.y + 2.3, t.z + rand(-.8, .8), pick([0xff8a2a, 0xffb040, 0xe0501c]), rand(10, 20), .04, { vy: .04, alpha: .9, size: rand(.4, .8), glow: true });
+  if (t.burn < 3600 && Math.random() < .25) addPuff(t.x + rand(-.6, .6), t.y + 2.6, t.z + rand(-.6, .6), pick([0x2a2724, 0x3a3631]), rand(150, 260), .012, { vx: .01, vy: rand(.03, .06), alpha: .55, size: rand(.8, 1.4) });
+}
+function updateTanks() {
+  tanks.forEach(updateTank);
+  for (const t of tanks) {
+    if (!t.dead && t.hp <= 0) knockOut(t);
+    if (!t.dead) {
+      t.gun.position.z += (0 - t.gun.position.z) * .08;      // gun slides back out after recoil
+      const f = Math.max(.001, t.hp / t.maxHp);
+      t.bar.fill.scale.set(2.3 * f, .12, 1); t.bar.fill.center.x = .5 / f; t.bar.fill.material.color.set(hpColor(f));
+    }
+  }
+  updateShells();
+  engineSound();
+}
+// reinforcements: your side gets up to ALLY_TANKS, the Germans bring more tanks as the waves go on
+function tankWave() {
+  const ours = tanks.filter(t => t.side === "ally" && !t.dead).length;
+  for (let i = ours; i < ALLY_TANKS; i++) {
+    const lead = players[0];
+    for (let tries = 0; tries < 60; tries++) {
+      const x = Math.max(MINX + 5, lead.x - rand(14, 26)), z = lead.z + rand(-20, 20);
+      const t = { x, z, half: [1.4, 2.95] };
+      if (tankFits(t, x, z, Math.PI / 2)) { const tk = makeTank("ally", x, z, Math.PI / 2); tk.slot = (i - .5) * 10; tanks.push(tk); break; }
+    }
+  }
+  const theirs = Math.min(ENEMY_TANKS + Math.floor((wave - 1) / 2), 6);   // German tanks still fighting count towards this
+  for (let i = tanks.filter(t => t.side === "enemy" && !t.dead).length; i < theirs; i++) {
+    for (let tries = 0; tries < 60; tries++) {
+      const x = MAXX - rand(5, 10), z = rand(MINZ + 6, MAXZ - 6), t = { x, z, half: [1.5, 2.95] };
+      if (tankFits(t, x, z, -Math.PI / 2)) { tanks.push(makeTank("enemy", x, z, -Math.PI / 2)); break; }
+    }
+  }
+}
+let engineNode = null;
+function engineSound() {             // one shared engine rumble, as loud as the nearest moving tank
+  if (!sound.ctx || sound.muted) return;
+  if (!engineNode) {
+    const ctx = sound.ctx, src = ctx.createBufferSource(); src.buffer = sound.noise; src.loop = true;
+    const lp = ctx.createBiquadFilter(); lp.type = "lowpass"; lp.frequency.value = 140;
+    const osc = ctx.createOscillator(); osc.type = "sawtooth"; osc.frequency.value = 38;
+    const og = ctx.createGain(); og.gain.value = .25;
+    const g = ctx.createGain(); g.gain.value = 0;
+    src.connect(lp); lp.connect(g); osc.connect(og); og.connect(lp); g.connect(sound.master); src.start(); osc.start();
+    engineNode = { g, osc };
+  }
+  let loud = 0;
+  for (const t of tanks) if (!t.dead) loud = Math.max(loud, hearing(t.x, t.z).vol * (.4 + Math.min(1, Math.abs(t.speed) / TANK_SPEED) * .6));
+  engineNode.g.gain.setTargetAtTime(loud * .9, sound.ctx.currentTime, .1);
 }
 
 // ---------- 4) THE SOLDIERS ----------
@@ -1735,7 +2113,7 @@ function buildSoldier(kind) {
   let held;
   if (kind !== "german") {                            // items the players can hold in the right hand
     held = {};
-    for (const [id, at] of [["grenade", [.13, 1.37, .34]], ["bandage", [.11, 1.35, .38]], ["binoculars", [.1, 1.43, .5]]]) {
+    for (const [id, at] of [["grenade", [.13, 1.37, .34]], ["bandage", [.11, 1.35, .38]], ["smoke", [.13, 1.36, .34]]]) {
       held[id] = mesh(itemGeos[id], torso, itemMat); held[id].position.set(...at); held[id].visible = false;
     }
   }
@@ -1769,7 +2147,7 @@ function makePlayer(num) {
   const s = buildSoldier(num === 1 ? "british" : "american");
   return {
     num, x: num === 1 ? -10 : 10, z: 0, y: groundY(num === 1 ? -10 : 10, 0), yaw: 0, r: .5, hp: MAX_HP, ammo: MAG_SIZE, reload: 0, cool: 0,
-    alive: true, inv: newInventory(), slot: 0, bandaging: 0, zoom: 0, shake: 0, vx: 0, vz: 0, jumpY: 0, vy: 0, land: 0, sinceHit: 0, healing: false, crouched: false, crouchAmt: 0, walk: 0, gait: 0, kick: 0, ...s, bar: makeHealthBar(s.group),
+    alive: true, inv: newInventory(), slot: 0, bandaging: 0, shake: 0, vx: 0, vz: 0, jumpY: 0, vy: 0, land: 0, sinceHit: 0, healing: false, crouched: false, crouchAmt: 0, walk: 0, gait: 0, kick: 0, ...s, bar: makeHealthBar(s.group),
     cam: new THREE.PerspectiveCamera(65, 1, .1, 280),
   };
 }
@@ -1818,6 +2196,12 @@ function clearWorld() {
   for (const o of [...players, ...fallen]) removeStain(o);
   for (const g of grenades) scene.remove(g.mesh);
   grenades = [];
+  for (const c of smokes) scene.remove(c.mesh);
+  smokes = [];
+  for (const t of tanks) scene.remove(t.group);
+  for (const sh of shells) scene.remove(sh.mesh);
+  tanks = []; shells = [];
+  if (engineNode) engineNode.g.gain.value = 0;
   players = []; allies = []; enemies = []; fallen = []; bullets = []; puffs = [];
 }
 function startGame(n) {
@@ -1845,6 +2229,7 @@ function nextWave() {
   setTimeout(() => play("whistle"), 300);
   spawnQueue = 3 + wave * 2 + EXTRA_ENEMIES;
   while (players.length && allies.length < ALLIES) allies.push(makeAlly());   // reinforcements replace the fallen
+  if (players.length) tankWave();
   spawnTimer = 0;
   waveTimer = 120;
   for (const p of players) {            // fallen soldiers come back, everyone patches up
@@ -1854,11 +2239,13 @@ function nextWave() {
   }
 }
 // puffs: smoke, dust and sparks. Optional extras: drift speed (vx, vy, vz), starting see-through-ness (alpha), glow
-function addPuff(x, y, z, color, life, grow, { vx = 0, vy = 0, vz = 0, alpha = .8, size = 1, glow = false, gravity = false } = {}) {
-  const mesh = new THREE.Mesh(puffGeo, new THREE.MeshBasicMaterial({
-    color, transparent: true, opacity: alpha, depthWrite: false,
-    blending: glow ? THREE.AdditiveBlending : THREE.NormalBlending,
-  }));
+function addPuff(x, y, z, color, life, grow, { vx = 0, vy = 0, vz = 0, alpha = .8, size = 1, glow = false, gravity = false, soft = false } = {}) {
+  const mesh = soft ? new THREE.Sprite(new THREE.SpriteMaterial({ map: softTex, color, transparent: true, opacity: alpha, depthWrite: false }))
+    : new THREE.Mesh(puffGeo, new THREE.MeshBasicMaterial({
+      color, transparent: true, opacity: alpha, depthWrite: false,
+      blending: glow ? THREE.AdditiveBlending : THREE.NormalBlending,
+    }));
+  if (soft) size *= 2.2;                                 // a soft sprite needs to be bigger to look as full as a ball
   mesh.position.set(x, y, z); mesh.scale.setScalar(size); scene.add(mesh);
   puffs.push({ mesh, life, max: life, grow, vx, vy, vz, alpha, gravity });
 }
@@ -2013,7 +2400,6 @@ function updatePlayer(p) {
   const firing = p.num === 1 ? (keys.Space || (!twoPlayer && mouse.down)) : keys.Enter;
   const pressed = firing && !p.fireHeld;                 // grenades and bandages: one per press
   p.fireHeld = firing;
-  p.zoomWant = item.id === "binoculars" && firing;      // binoculars: hold to look through them
   if (item.id === "rifle") {
     const reloadKey = p.num === 1 ? keys.KeyR : keys.ShiftRight;
     if (reloadKey && p.ammo < MAG_SIZE && !p.reload) { p.reload = RELOAD_TIME; play("reload", p.x, p.z); }
@@ -2021,13 +2407,17 @@ function updatePlayer(p) {
       if (p.ammo > 0) { shoot(p, p.yaw, "ally", .02); p.ammo--; p.cool = 12; }
       else { p.reload = RELOAD_TIME; play("reload", p.x, p.z); }
     }
-  } else if (item.id === "grenade") {
-    if (pressed && item.count > 0 && p.cool === 0) { throwGrenade(p); item.count--; p.cool = 40; }
+  } else if (item.id === "grenade" || item.id === "smoke") {
+    if (pressed && item.count > 0 && p.cool === 0) { throwGrenade(p, item.id); item.count--; p.cool = 40; }
   } else if (item.id === "bandage") {
     if (pressed && item.count > 0 && !p.bandaging && p.hp < MAX_HP) { p.bandaging = BANDAGE_TIME; item.count--; play("bandage", p.x, p.z); }
   }
 }
 
+function canSee(s, t) {
+  if (s.seeTarget !== t || --s.seeTimer <= 0) { s.seeTarget = t; s.sees = clearShot(s, t) && !smokeBlocks(s, t); s.seeTimer = 8 + Math.floor(Math.random() * 6); }
+  return s.sees;
+}
 function updateAlly(a) {
   if (a.flash > 0 && --a.flash === 0) a.uni.emissive.setHex(0);
   const lead = players.find(p => p.alive) || players[0];
@@ -2039,7 +2429,7 @@ function updateAlly(a) {
   const want = Math.atan2(tx - a.x, tz - a.z);
   const diff = Math.atan2(Math.sin(want - a.yaw), Math.cos(want - a.yaw));
   a.yaw += Math.max(-ENEMY_TURN, Math.min(ENEMY_TURN, diff));
-  const sees = t && !goHome && clearShot(a, t);
+  const sees = t && !goHome && canSee(a, t);
   if (goHome) {
     const f = forward(a.yaw), go = fromHome > 3 ? ENEMY_SPEED * (fromHome > 12 ? 1.3 : 1) : 0;
     steer(a, f.x * go, f.z * go, AGILITY * .6);
@@ -2067,7 +2457,7 @@ function updateEnemy(e) {
   const want = Math.atan2(t.x - e.x, t.z - e.z);
   const diff = Math.atan2(Math.sin(want - e.yaw), Math.cos(want - e.yaw));   // shortest way round
   e.yaw += Math.max(-ENEMY_TURN, Math.min(ENEMY_TURN, diff));
-  const sees = clearShot(e, t);
+  const sees = canSee(e, t);
   if (e.pause > 0) { e.pause--; steer(e, 0, 0, AGILITY * .6); }            // brief stop to take aim
   else if (d > 15 || !sees) {
     const f = forward(e.yaw); steer(e, f.x * ENEMY_SPEED, f.z * ENEMY_SPEED, AGILITY * .6);
@@ -2090,20 +2480,25 @@ function update() {
   players.forEach(updatePlayer);
   enemies.forEach(updateEnemy);
   allies.forEach(updateAlly);
+  updateTanks();
   for (const p of players) if (p.alive) animateSoldier(p, false); else animateDeath(p);
   for (const e of enemies) animateSoldier(e, false);
   for (const a of allies) animateSoldier(a, false);
 
   if (waveTimer > 0) waveTimer--;
-  if (spawnQueue > 0 && --spawnTimer <= 0) { enemies.push(makeEnemy()); spawnQueue--; spawnTimer = 50; }
+  if (spawnQueue > 0 && --spawnTimer <= 0) { enemies.push(makeEnemy()); spawnQueue--; spawnTimer = SPAWN_GAP; }
 
   for (const b of bullets) {
     b.x += b.vx; b.z += b.vz; b.life--; b.trav += BULLET_SPEED;
     b.y = b.h0 + (b.h1 - b.h0) * b.trav / b.reach;      // a straight line from the muzzle towards the target
     b.mesh.position.set(b.x, b.y, b.z);
     if (b.x < MINX || b.x > MAXX || b.z < MINZ || b.z > MAXZ) b.life = 0;
-    const sweptWall = [.25, .5, .75].some(k => wallStopsShot(b.x - b.vx * k, b.z - b.vz * k, b.y));   // check along the whole step too
-    if (sweptWall || wallStopsShot(b.x, b.z, b.y)) { b.life = 0; play("dirt", b.x, b.z); addPuff(b.x, Math.min(b.y, 2.5), b.z, 0xd6c9a0, 18, .06); }   // dust off the wall
+    const hitTank = [0, .25, .5, .75].map(k => tankAt(b.x - b.vx * k, b.z - b.vz * k, b.y, b.owner)).find(t => t);
+    const sweptWall = !hitTank && [.25, .5, .75].some(k => wallStopsShot(b.x - b.vx * k, b.z - b.vz * k, b.y, b.owner));   // check along the whole step too
+    if (hitTank) {                                     // a rifle bullet pings off armour
+      b.life = 0; hitTank.hp -= 1; play("clang", b.x, b.z);
+      addPuff(b.x, b.y, b.z, 0xffd080, 4, 0, { alpha: 1, size: .12, glow: true });
+    } else if (sweptWall || wallStopsShot(b.x, b.z, b.y, b.owner)) { b.life = 0; play("dirt", b.x, b.z); addPuff(b.x, Math.min(b.y, 2.5), b.z, 0xd6c9a0, 18, .06); }   // dust off the wall
     else if (b.y < groundY(b.x, b.z)) { b.life = 0; play("dirt", b.x, b.z, { vol: .7 }); addPuff(b.x, groundY(b.x, b.z) + .1, b.z, 0x9a8a6a, 14, .05); }  // kicks up dirt
     const victims = b.team === "ally" ? enemies : [...players.filter(p => p.alive), ...allies];
     if (b.team === "enemy" && b.life > 0 && !b.whizzed) for (const p of players)   // a near miss whizzes past your ear
@@ -2152,6 +2547,7 @@ function update() {
   puffs = puffs.filter(p => p.life > 0);
   updateCasings();
   updateGrenades();
+  updateSmokes();
   for (const l of flashLights) l.intensity *= .45;       // flash light fades in a few frames
 
   if (!players.some(p => p.alive)) {
@@ -2394,14 +2790,6 @@ function placeCamera(p) {
   p.cam.position.copy(hit ? camHead.clone().addScaledVector(camRay.ray.direction, Math.max(.3, hit.distance - .3)) : camWant);
   p.camClose = p.cam.position.distanceTo(camHead) < 1.6;   // squeezed right up behind the soldier
   camLook.set(p.x + f.x * 10, 1.3 + p.camY, p.z + f.z * 10);
-  // binoculars: move to the soldier's eyes and zoom right in
-  p.zoom += ((p.zoomWant && p.alive ? 1 : 0) - p.zoom) * .2;
-  if (p.zoom > .01) {
-    p.cam.position.lerp(camWant.set(p.x + f.x * .35, p.camY + 1.95, p.z + f.z * .35), p.zoom);
-    camLook.lerp(camWant.set(p.x + f.x * 40, p.camY + 1.8, p.z + f.z * 40), p.zoom);
-    if (p.zoom > .3) p.camClose = true;
-  }
-  p.cam.fov = 65 - 45 * p.zoom;
   // a nearby explosion shakes the view
   if (p.shake > .01) { p.cam.position.x += rand(-1, 1) * p.shake * .3; p.cam.position.y += rand(-1, 1) * p.shake * .3; p.shake *= .9; }
   p.cam.lookAt(camLook);
@@ -2455,7 +2843,7 @@ function updateHUD() {
     document.getElementById("hurt" + p.num).style.opacity = Math.max(p.hurtFlash * .75, low);
     document.getElementById("ammo" + p.num).textContent = p.reload ? "RELOADING..." : "AMMO " + "▮".repeat(p.ammo) + "▯".repeat(MAG_SIZE - p.ammo);
   });
-  document.getElementById("topline").textContent = `WAVE ${wave} · SCORE ${score} · ALLIES ${allies.length} · ENEMIES ${enemies.length + spawnQueue}`;
+  document.getElementById("topline").textContent = `WAVE ${wave} · SCORE ${score} · ALLIES ${allies.length} · ENEMIES ${enemies.length + spawnQueue} · TANKS ${tanks.filter(t => !t.dead && t.side === "ally").length} v ${tanks.filter(t => !t.dead && t.side === "enemy").length}`;
   const banner = document.getElementById("banner");
   banner.textContent = paused ? "PAUSED" : "WAVE " + wave;
   banner.style.opacity = paused || waveTimer > 0 ? 1 : 0;

@@ -71,7 +71,6 @@ kbd { font-family: var(--mono); background: #3a3c2e; padding: 1px 6px; border-ra
 .slot .count { position: absolute; bottom: 2px; right: 4px; font-size: 12px; font-weight: 700; }
 .slot .label { position: absolute; bottom: 100%; margin-bottom: 4px; font-size: 11px; white-space: nowrap; opacity: 0; transition: opacity .2s; }
 .slot.on .label { opacity: 1; }
-.binoc { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; transition: opacity .15s; pointer-events: none; }
 
 /* red at the edges of the screen when hurt */
 .hurt { position: absolute; inset: 0; pointer-events: none; opacity: 0; background: radial-gradient(ellipse at center, transparent 55%, rgba(140, 10, 10, .55) 100%); }

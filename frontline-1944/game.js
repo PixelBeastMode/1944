@@ -7,7 +7,7 @@
 //            5 game rules · 6 drawing · 7 controls
 // ============================================================
 
-const BUILD = 40;             // shown on screen, so you can tell the browser loaded the newest version
+const BUILD = 43;             // shown on screen, so you can tell the browser loaded the newest version
 document.querySelector(".tag").textContent += " · build " + BUILD;
 
 // ---------- 1) SETTINGS: change these to tweak the game ----------
@@ -38,6 +38,7 @@ const ALLIES = 10;            // computer-controlled soldiers on your side (topp
 const ALLY_HP = 100;
 const EXTRA_ENEMIES = 60;     // extra enemy soldiers added to every wave
 const SPAWN_GAP = 15;         // frames between enemies arriving (60 = 1 second)
+const ARRIVE_DISTANCE = 90;   // enemies appear at most this far from you
 const ALLY_TANKS = 2;         // Shermans on your side (replaced each wave if knocked out)
 const ENEMY_TANKS = 2;        // Panzer IVs in the first wave (more come later)
 const TANK_HP = 600;          // rifle bullets barely scratch a tank: use grenades
@@ -45,10 +46,14 @@ const TANK_SPEED = .045;      // map units per frame
 const TANK_RELOAD = 300;      // frames between main gun shots
 const SHELL_POWER = 1.3;      // a tank shell's blast compared with a grenade
 const TANK_ARMOUR_BLAST = 1.8;   // how much blasts hurt tanks
+const KRADS_ALLY = 4;         // Kettenkrads parked near your start (topped up each wave)
+const KRADS_ENEMY = 3;        // German Kettenkrads that arrive each wave, two soldiers on each
+const KRAD_SPEED = .28;       // top speed (map units per frame: .28 is about 60 km/h)
+const KRAD_HP = 150;
 const MAG_SIZE = 8;
 const RELOAD_TIME = 70;
-const MINX = -80, MAXX = 80, MINZ = -52, MAXZ = 52;   // edges of the battlefield (inside the barbed wire)
-const WORLD_X = 150, WORLD_Z = 110;   // half the size of the whole landscape, including the woods outside the wire
+const MINX = -160, MAXX = 160, MINZ = -104, MAXZ = 104;   // edges of the battlefield (inside the barbed wire)
+const WORLD_X = 230, WORLD_Z = 175;   // half the size of the whole landscape, including the woods outside the wire
 
 // ---------- 2) THE MAP: sandbags and ruined walls (x, z = corner; w, d = size) ----------
 const walls = [
@@ -78,6 +83,16 @@ const walls = [
   { x: 60,  z: 20,  w: 1.2, d: 9, type: "ruin" },
   { x: 30,  z: -34, w: 8, d: 1.2, type: "ruin" },
 ];
+(function moreCover() {              // the outer battlefield gets its own sandbag positions and ruins
+  for (let tries = 0, n = 0; n < 34 && tries < 3000; tries++) {
+    const x = (Math.random() * 2 - 1) * (MAXX - 12), z = (Math.random() * 2 - 1) * (MAXZ - 12);
+    if (Math.abs(x) < 88 && Math.abs(z) < 60) continue;           // the middle already has plenty
+    const bags = Math.random() < .65, long = Math.random() < .5, len = bags ? 8 + Math.random() * 6 : 7 + Math.random() * 5, thick = bags ? 2.6 : 1.2;
+    const w = { x, z, w: long ? len : thick, d: long ? thick : len, type: bags ? "bags" : "ruin" };
+    if (walls.some(o => x < o.x + o.w + 10 && x + w.w > o.x - 10 && z < o.z + o.d + 10 && z + w.d > o.z - 10)) continue;   // keep them apart
+    walls.push(w); n++;
+  }
+})();
 for (const w of walls) w.top = w.type === "bags" ? 1.3 : 2.6;   // how tall each wall is (bullets fly over low ones from up high)
 
 // ---------- the bombed-out house: two storeys, the top one mostly blown away into an open flat roof ----------
@@ -200,7 +215,8 @@ const insideWall = (x, z) => walls.some(w => x > w.x && x < w.x + w.w && z > w.z
 function blocked(x, z, r, y = 0) {  // y = how high the soldier's feet are: walls only block at their own height
   if (x < MINX + r || x > MAXX - r || z < MINZ + r || z > MAXZ - r) return true;
   return walls.some(w => y < w.top - .25 && y > (w.base || 0) - .6 && circleHitsRect(x, z, r, w))
-    || tanks.some(t => y < t.y + 2.4 && insideTank(t, x, z, r));
+    || tanks.some(t => y < t.y + 2.4 && insideTank(t, x, z, r))
+    || krads.some(k => y < k.y + 1 && insideTank(k, x, z, r));
 }
 const tooSteep = (o, x, z) => groundY(x, z) > (o.y ?? 0) + .6;   // a trench wall or other drop too high to step up
 function move(o, dx, dz) {           // slide along walls instead of sticking
@@ -252,10 +268,10 @@ renderer.toneMappingExposure = .95;
 const scene = new THREE.Scene();
 const SKY_TOP = 0x7d93ab, SKY_HAZE = 0xc4c6b8;        // a hazy summer sky: blue-grey above, pale haze at the horizon
 scene.background = new THREE.Color(SKY_HAZE);
-scene.fog = new THREE.Fog(SKY_HAZE, 50, 190);
+scene.fog = new THREE.Fog(SKY_HAZE, 60, 240);
 
 // the sky: a big dome that follows the camera, blending from haze at the horizon to blue overhead, brighter near the sun
-const sky = new THREE.Mesh(new THREE.SphereGeometry(250, 32, 16), new THREE.ShaderMaterial({
+const sky = new THREE.Mesh(new THREE.SphereGeometry(300, 32, 16), new THREE.ShaderMaterial({
   side: THREE.BackSide, depthWrite: false, fog: false,
   uniforms: { top: { value: new THREE.Color(SKY_TOP) }, haze: { value: new THREE.Color(SKY_HAZE) },
     sunDir: { value: new THREE.Vector3(30, 50, 20).normalize() }, sunCol: { value: new THREE.Color(0xfff2d6) } },
@@ -280,8 +296,13 @@ const sun = new THREE.DirectionalLight(0xfff0d8, 2.4);
 sun.position.set(30, 50, 20);
 sun.castShadow = true;
 sun.shadow.mapSize.set(4096, 4096);
-Object.assign(sun.shadow.camera, { left: -100, right: 100, top: 75, bottom: -75, near: 1, far: 240 });
-scene.add(sun);
+Object.assign(sun.shadow.camera, { left: -90, right: 90, top: 90, bottom: -90, near: 1, far: 260 });   // moved to follow you in render()
+scene.add(sun); scene.add(sun.target);
+const SUN_DIR = new THREE.Vector3(30, 50, 20).normalize();
+function shadowsAround(x, z) {      // the sun's shadows cover the area around (x, z)
+  sun.target.position.set(Math.round(x / 2) * 2, 0, Math.round(z / 2) * 2);
+  sun.position.copy(sun.target.position).addScaledVector(SUN_DIR, 120);
+}
 
 // ---- smooth random "noise", used to make the ground and plants look natural ----
 const clamp01 = v => Math.max(0, Math.min(1, v));
@@ -319,7 +340,7 @@ const track = (x, z) => clamp01(1 - Math.abs(z - 9 * Math.sin(x * .05) - 3) / 1.
 
 // shell craters, kept away from the walls and the spots where soldiers start
 const craters = [];
-for (let tries = 0; craters.length < 55 && tries < 1500; tries++) {
+for (let tries = 0; craters.length < 150 && tries < 5000; tries++) {
   const c = { x: rand(-MAXX - 30, MAXX + 30), z: rand(-MAXZ - 25, MAXZ + 25), r: rand(1.3, 3.6) };
   if (wallGap(c.x, c.z) < c.r + 1.5 || Math.hypot(Math.abs(c.x) - 10, c.z) < c.r + 2.5 || trenchAt(c.x, c.z).d < c.r + 2.5) continue;
   if (craters.some(o => Math.hypot(o.x - c.x, o.z - c.z) < o.r + c.r + .5)) continue;
@@ -373,7 +394,23 @@ function groundY(x, z, visual = false) {
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping; tex.repeat.set(WORLD_X * .6, WORLD_Z * .6);
   tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
 
-  const geo = new THREE.PlaneGeometry(WORLD_X * 2, WORLD_Z * 2, 640, 470); geo.rotateX(-Math.PI / 2);   // fine enough to show the trenches
+  const FX = MAXX + 10, FZ = MAXZ + 10, IN_X = 680, IN_Z = 456, OUT = 26;   // fine part (about 0.5 m between points) and coarse rim
+  const geo = new THREE.PlaneGeometry(1, 1, IN_X + OUT * 2, IN_Z + OUT * 2); geo.rotateX(-Math.PI / 2);
+  const spread = (k, n, fine, world) => {                 // grid line k of n -> a position: evenly spaced inside, stretched outside
+    const j = k - OUT, inner = n - OUT * 2;
+    if (j < 0) return -fine - (world - fine) * (-j / OUT);
+    if (j > inner) return fine + (world - fine) * ((j - inner) / OUT);
+    return -fine + 2 * fine * j / inner;
+  };
+  {
+    const p = geo.attributes.position, uv = geo.attributes.uv, cols = IN_X + OUT * 2 + 1;
+    for (let i = 0; i < p.count; i++) {
+      const col = i % cols, row = Math.floor(i / cols);
+      const x = spread(col, IN_X + OUT * 2, FX, WORLD_X), z = spread(row, IN_Z + OUT * 2, FZ, WORLD_Z);
+      p.setX(i, x); p.setZ(i, z);
+      uv.setXY(i, (x + WORLD_X) / (2 * WORLD_X), 1 - (z + WORLD_Z) / (2 * WORLD_Z));   // keeps the ground texture evenly sized
+    }
+  }
   const pos = geo.attributes.position, cols = [];
   const grass = new THREE.Color(0x5a7432), dry = new THREE.Color(0x8c874e), dirt = new THREE.Color(0x76624a);
   const mud = new THREE.Color(0x54432d), scorch = new THREE.Color(0x2f281d), col = new THREE.Color();
@@ -498,7 +535,7 @@ function mergeParts(parts, dapple = .24, smooth = false) {
   return geo;
 }
 const pick = list => list[Math.floor(Math.random() * list.length)];
-const FIELD_TREES = 28;      // trees standing inside the battlefield
+const FIELD_TREES = 85;      // trees standing inside the battlefield
 const windTime = { value: 0 };     // drives grass and leaves swaying in the wind
 const outsideFence = (x, z, gap) => Math.abs(x) > MAXX + gap || Math.abs(z) > MAXZ + gap;
 
@@ -682,7 +719,7 @@ function leafCluster(L, center, radius, crownCenter, count, tint, cardSize = 1.1
   }
 
   // the woods outside the wire
-  for (let i = 0; i < 240; i++) {
+  for (let i = 0; i < 420; i++) {
     let x, z;
     do { x = rand(-WORLD_X + 8, WORLD_X - 8); z = rand(-WORLD_Z + 8, WORLD_Z - 8); } while (!outsideFence(x, z, 4));
     growTree(x, z, Math.random());
@@ -712,7 +749,7 @@ function leafCluster(L, center, radius, crownCenter, count, tint, cardSize = 1.1
 (function makeBushes() {
   const B = plantBuilder(), L = plantBuilder();
   const tints = [0xd8e4c0, 0xe4ecc6, 0xccdcb6, 0xe8e6c2].map(h => new THREE.Color(h));
-  for (let i = 0; i < 170; i++) {
+  for (let i = 0; i < 300; i++) {
     let x, z;
     do { x = rand(-WORLD_X + 5, WORLD_X - 5); z = rand(-WORLD_Z + 5, WORLD_Z - 5); } while (!outsideFence(x, z, 1.2));
     const y = groundY(x, z), size = rand(.5, 1.1), tint = pick(tints), center = V(x, y + size * .6, z);
@@ -732,7 +769,7 @@ function leafCluster(L, center, radius, crownCenter, count, tint, cardSize = 1.1
   const spots = [];
   for (const w of walls) if (w.type === "ruin") for (let i = 0; i < 14; i++) spots.push([w.x + rand(-1, w.w + 1), w.z + rand(-1.5, w.d + 1.5), .14]);
   for (const c of craters) for (let i = 0; i < 5; i++) { const a = rand(0, 6.3), d = c.r * rand(.9, 1.3); spots.push([c.x + Math.cos(a) * d, c.z + Math.sin(a) * d, .12]); }
-  for (let i = 0; i < 130; i++) spots.push([rand(-WORLD_X + 10, WORLD_X - 10), rand(-WORLD_Z + 10, WORLD_Z - 10), .22]);
+  for (let i = 0; i < 320; i++) spots.push([rand(-WORLD_X + 10, WORLD_X - 10), rand(-WORLD_Z + 10, WORLD_Z - 10), .22]);
   for (const [x, z, s0] of spots) {
     if (insideWall(x, z) || inRect(x, z, HOUSE, .3) || trenchAt(x, z).d < TRENCH.half + 1.4) continue;
     const s = s0 * rand(.6, 1.6);
@@ -909,13 +946,13 @@ let houseMesh;
       transformed.x += sin(windTime * 1.6 + root.x * .3 + root.z * .2) * .5 * bend;
       transformed.z += cos(windTime * 1.2 + root.z * .25) * .2 * bend;`);
   };
-  const COUNT = 45000;
+  const COUNT = 70000;
   const grass = new THREE.InstancedMesh(geo, mat, COUNT);
   const green = new THREE.Color(0x587a30), yellow = new THREE.Color(0x968c50), col = new THREE.Color();
   const m = new THREE.Matrix4(), q = new THREE.Quaternion(), up = new THREE.Vector3(0, 1, 0);
   let n = 0;
   for (let tries = 0; n < COUNT && tries < COUNT * 6; tries++) {
-    const x = rand(-WORLD_X + 2, WORLD_X - 2), z = rand(-WORLD_Z + 2, WORLD_Z - 2);
+    const x = rand(-MAXX - 25, MAXX + 25), z = rand(-MAXZ - 25, MAXZ + 25);
     if (fbm(x * .09, z * .09) < rand(.25, .7)) continue;        // grows in patches
     if (wallGap(x, z) < .5 || track(x, z) > rand(.3, 1)) continue;
     if (craters.some(c => Math.hypot(x - c.x, z - c.z) < c.r * .8) || inRect(x, z, HOUSE, .2) || trenchAt(x, z).d < TRENCH.half + 1.4) continue;
@@ -946,7 +983,7 @@ let houseMesh;
     geo.setAttribute("position", new THREE.Float32BufferAttribute(v, 3));
     geo.setAttribute("color", new THREE.Float32BufferAttribute(c, 3));
     geo.setAttribute("normal", new THREE.Float32BufferAttribute(v.map((_, i) => i % 3 === 1 ? 1 : 0), 3));
-    const TALL = 9000, tall = new THREE.InstancedMesh(geo, mat, TALL);
+    const TALL = 18000, tall = new THREE.InstancedMesh(geo, mat, TALL);
     const straw = new THREE.Color(0xb5a46a), sage = new THREE.Color(0x8c9a5c);
     let t = 0;
     for (let tries = 0; t < TALL && tries < TALL * 8; tries++) {
@@ -962,7 +999,7 @@ let houseMesh;
   }
 
   // wildflowers: mostly red poppies, some yellow and white
-  const FLOWERS = 2000;
+  const FLOWERS = 4500;
   const flowers = new THREE.InstancedMesh(new THREE.OctahedronGeometry(.055, 0), new THREE.MeshLambertMaterial(), FLOWERS);
   const petals = [0xb3261e, 0xb3261e, 0xc23a22, 0xd9c043, 0xe8e4d8];
   let f = 0;
@@ -1143,6 +1180,8 @@ function updateSmokes() {
     c.t++;
     const pouring = c.t < SMOKE_TIME, fading = clamp01((SMOKE_TIME + 420 - c.t) / 420);
     c.r = SMOKE_RADIUS * Math.min(1, c.t / 200) * fading;     // the cloud swells, holds, then thins out
+    const blown = Math.min(1, c.t / 600) * 1.5;               // the breeze carries the cloud a little way
+    c.cx = c.x + Math.cos(c.drift) * blown; c.cz = c.z + Math.sin(c.drift) * blown;
     const wx = Math.cos(c.drift) * .004, wz = Math.sin(c.drift) * .004;   // a gentle breeze
     if (pouring && c.t % 3 === 0) {
       const big = Math.min(1, c.t / 150);
@@ -1158,8 +1197,9 @@ function smokeBlocks(a, b) {         // does a smoke cloud lie between a and b?
   for (const c of smokes) {
     if (c.r < .5) continue;
     const dx = b.x - a.x, dz = b.z - a.z, L2 = dx * dx + dz * dz || 1;
-    const k = clamp01(((c.x - a.x) * dx + (c.z - a.z) * dz) / L2);
-    if (Math.hypot(a.x + dx * k - c.x, a.z + dz * k - c.z) < c.r * .85) return true;
+    const cx = c.cx ?? c.x, cz = c.cz ?? c.z;
+    const k = clamp01(((cx - a.x) * dx + (cz - a.z) * dz) / L2);
+    if (Math.hypot(a.x + dx * k - cx, a.z + dz * k - cz) < c.r * .85) return true;   // the line of sight passes through the cloud
   }
   return false;
 }
@@ -1178,6 +1218,7 @@ function blast(x, y, z, power) {     // an explosion at (x, y, z); power 1 = a g
     if (v.num) v.hurtFlash = 1;
     if (!v.num) { v.uni.emissive.setHex(0x777777); v.flash = 6; }
   }
+  for (const k of krads) { const d = Math.hypot(k.x - x, k.z - z); if (!k.dead && d < R) k.hp -= GRENADE_DAMAGE * power * (1 - d / R); }
   for (const t of tanks) {            // tanks shrug off a distant blast, but one right beside them does real damage
     const d = Math.max(0, Math.hypot(t.x - x, t.z - z) - 1.5);
     if (!t.dead && d < R) t.hp -= GRENADE_DAMAGE * power * TANK_ARMOUR_BLAST * (1 - d / R);
@@ -1216,9 +1257,10 @@ function blast(x, y, z, power) {     // an explosion at (x, y, z); power 1 = a g
 
 // which item a soldier is holding: the rifle in both hands, or slung on the back with the item in hand
 function showItem(s) {
-  if (!s.held || s.shownSlot === s.slot) return;
-  s.shownSlot = s.slot;
-  const id = s.inv[s.slot].id;
+  const key = s.riding ? -1 : s.slot;
+  if (!s.held || s.shownSlot === key) return;
+  s.shownSlot = key;
+  const id = s.riding ? "" : s.inv[s.slot].id;
   s.rifle.scale.set(1, 1, 1);                          // (in case it was dropped when he fell)
   if (id === "rifle") { s.torso.add(s.rifle); s.rifle.position.set(.1, 1.37, .02); s.rifle.rotation.set(0, 0, 0); }
   else { s.sling.add(s.rifle); s.rifle.position.set(0, 0, -.6); s.rifle.rotation.set(0, 0, 0); }
@@ -1604,11 +1646,11 @@ function updateTank(t) {
   const td = Math.atan2(Math.sin(aim - t.turret), Math.cos(aim - t.turret));
   t.turret += Math.max(-.02, Math.min(.02, td));
   const sees = d < 95 && tankSees(t, target);
-  if (--t.reload <= 0 && sees && Math.abs(td) < .05) { fireShell(t, target); t.reload = TANK_RELOAD + rand(-40, 60); }
+  if (--t.reload <= 0 && sees && Math.abs(td) < .05 && !smokeBlocks(t, target)) { fireShell(t, target); t.reload = TANK_RELOAD + rand(-40, 60); }
   // machine gun bursts at soldiers that are close enough
   if (!target.tank && sees && d < 45 && Math.abs(td) < .25) {
     if (t.burst <= 0 && --t.mgCool <= 0) { t.burst = 8; t.mgCool = rand(60, 120); }
-    if (t.burst > 0 && t.burst-- % 2 === 0) tankBullet(t, target);
+    if (t.burst > 0 && t.burst-- % 2 === 0 && !smokeBlocks(t, target)) tankBullet(t, target);
   }
 }
 function tankSees(t, target) {
@@ -1698,7 +1740,7 @@ function tankWave() {
   const theirs = Math.min(ENEMY_TANKS + Math.floor((wave - 1) / 2), 6);   // German tanks still fighting count towards this
   for (let i = tanks.filter(t => t.side === "enemy" && !t.dead).length; i < theirs; i++) {
     for (let tries = 0; tries < 60; tries++) {
-      const x = MAXX - rand(5, 10), z = rand(MINZ + 6, MAXZ - 6), t = { x, z, half: [1.5, 2.95] };
+      const lead = players[0], x = Math.min(MAXX - 6, lead.x + ARRIVE_DISTANCE + rand(-5, 10)), z = Math.max(MINZ + 6, Math.min(MAXZ - 6, lead.z + rand(-40, 40))), t = { x, z, half: [1.5, 2.95] };
       if (tankFits(t, x, z, -Math.PI / 2)) { tanks.push(makeTank("enemy", x, z, -Math.PI / 2)); break; }
     }
   }
@@ -1718,6 +1760,218 @@ function engineSound() {             // one shared engine rumble, as loud as the
   let loud = 0;
   for (const t of tanks) if (!t.dead) loud = Math.max(loud, hearing(t.x, t.z).vol * (.4 + Math.min(1, Math.abs(t.speed) / TANK_SPEED) * .6));
   engineNode.g.gain.setTargetAtTime(loud * .9, sound.ctx.currentTime, .1);
+}
+
+// ---------- KETTENKRADS: half-track motorbikes. Yours are parked near the start; the Germans drive theirs in ----------
+const kradGeos = {};
+function kradGeometry(side) {
+  const ally = side === "ally", paint = ally ? 0x5a6236 : 0xb39d63, dark = ally ? 0x3c4126 : 0x6e6040;
+  const steel = 0x3a3a34, rubber = 0x1b1a18, P = [];
+  // half-tracks on both sides: top and bottom runs, road wheels, sprocket at the front, idler at the back
+  for (const sx of [-1, 1]) {
+    const x = sx * .42;
+    P.push({ geo: new THREE.BoxGeometry(.2, .05, 1.35), at: [x, .04, -.48], color: 0x2e2d29 });
+    P.push({ geo: new THREE.BoxGeometry(.2, .05, 1.45), at: [x, .52, -.48], color: 0x2e2d29 });
+    P.push({ geo: wheelGeo(.25, .2), at: [x, .28, .23], color: 0x2e2d29 });
+    P.push({ geo: wheelGeo(.17, .23), at: [x, .28, .23], color: steel });
+    P.push({ geo: wheelGeo(.25, .2), at: [x, .28, -1.2], color: 0x2e2d29 });
+    P.push({ geo: wheelGeo(.17, .23), at: [x, .28, -1.2], color: steel });
+    for (let i = 0; i < 4; i++) {                       // interleaved road wheels
+      P.push({ geo: wheelGeo(.2, .1), at: [x + (i % 2 ? .05 : -.05), .22, -.95 + i * .32], color: rubber });
+      P.push({ geo: wheelGeo(.13, .12), at: [x + (i % 2 ? .05 : -.05), .22, -.95 + i * .32], color: steel });
+    }
+    for (let i = 0; i < 12; i++) P.push({ geo: new THREE.BoxGeometry(.21, .03, .04), at: [x, .015, -1.12 + i * .115], color: rubber });   // track links
+  }
+  // body: engine and seats, mudguards over the tracks
+  P.push({ geo: slab(.62, .45, 1.6, .25, 0), at: [0, .58, -.35], color: paint });
+  for (const sx of [-1, 1]) P.push({ geo: new THREE.BoxGeometry(.28, .04, 1.55), at: [sx * .43, .62, -.45], color: paint });
+  P.push({ geo: new THREE.BoxGeometry(.36, .1, .42), at: [0, .86, .08], color: 0x2a221a });          // driver's saddle
+  P.push({ geo: new THREE.BoxGeometry(.82, .1, .38), at: [0, .86, -.85], color: 0x2a221a });         // rear bench for two, facing back
+  P.push({ geo: new THREE.BoxGeometry(.82, .32, .06), at: [0, 1.0, -.62], color: dark });             // its backrest
+  P.push({ geo: new THREE.BoxGeometry(.5, .08, .25), at: [0, .62, -1.25], color: dark });             // tow hitch plate
+  // front: fork, motorbike wheel with mudguard, handlebars and headlight
+  P.push({ geo: wheelGeo(.3, .12), at: [0, .3, 1.15], color: rubber });
+  P.push({ geo: wheelGeo(.17, .14), at: [0, .3, 1.15], color: steel });
+  P.push({ geo: new THREE.CylinderGeometry(.33, .33, .14, 16, 1, true, -Math.PI / 2, Math.PI).rotateZ(Math.PI / 2), at: [0, .32, 1.15], color: paint });   // mudguard
+  for (const sx of [-1, 1]) P.push({ geo: new THREE.CylinderGeometry(.025, .025, .78, 6), at: [sx * .09, .66, .98], rot: [-.42, 0, 0], color: steel });   // fork legs
+  P.push({ geo: new THREE.CylinderGeometry(.018, .018, .62, 6).rotateZ(Math.PI / 2), at: [0, 1.08, .78], color: steel });   // handlebars
+  for (const sx of [-1, 1]) P.push({ geo: new THREE.CylinderGeometry(.025, .025, .1, 6).rotateZ(Math.PI / 2), at: [sx * .3, 1.08, .78], color: 0x1b1a18 });   // grips
+  P.push({ geo: new THREE.CylinderGeometry(.08, .07, .1, 12).rotateX(Math.PI / 2), at: [0, .9, .92], color: dark });   // headlight
+  P.push({ geo: new THREE.BoxGeometry(.3, .25, .25), at: [0, .82, .55], color: paint });              // fuel tank in front of the saddle
+  // markings
+  if (ally) for (const sx of [-1, 1]) P.push({ geo: star(.15), at: [sx * .312, .62, -.45], rot: [0, sx * Math.PI / 2, 0], color: 0xe8e6dc });
+  else for (const sx of [-1, 1]) {
+    P.push({ geo: new THREE.BoxGeometry(.01, .26, .09), at: [sx * .313, .62, -.45], color: 0xeeeeea }); P.push({ geo: new THREE.BoxGeometry(.01, .09, .26), at: [sx * .313, .62, -.45], color: 0xeeeeea });
+    P.push({ geo: new THREE.BoxGeometry(.012, .2, .05), at: [sx * .315, .62, -.45], color: 0x111111 }); P.push({ geo: new THREE.BoxGeometry(.012, .05, .2), at: [sx * .315, .62, -.45], color: 0x111111 });
+  }
+  return mergeParts(P, .08, true);
+}
+const KRAD_HALF = [.55, 1.45];       // half width, half length
+let krads = [];
+function seatSoldier(s, backwards) { // pose a soldier sitting: thighs forward, shins down
+  for (let i = 0; i < 2; i++) { s.hips[i].rotation.set(-1.45, 0, (i ? 1 : -1) * .12); s.knees[i].rotation.x = 1.35; }
+  s.body.position.y = 0; s.body.rotation.z = 0;
+  s.upper.rotation.set(backwards ? -.05 : .15, 0, 0);
+}
+function makeKrad(side, x, z, yaw, riders = 0) {
+  const geo = kradGeos[side] || (kradGeos[side] = kradGeometry(side));
+  const mat = tankMat.clone(), group = new THREE.Group();
+  group.rotation.order = "YXZ";
+  const m = new THREE.Mesh(geo, mat); m.castShadow = m.receiveShadow = true; group.add(m);
+  scene.add(group);
+  const k = { krad: true, side, x, z, y: groundY(x, z), yaw, speed: 0, hp: KRAD_HP, dead: false, burn: 0, rider: null, group, mat,
+    half: KRAD_HALF, stuck: 0, reverse: 0, riders: [], hitCool: 0 };
+  // German Kettenkrads arrive with soldiers on board: one driving, one on the back bench
+  for (let i = 0; i < riders; i++) {
+    const s = buildSoldier("german");
+    scene.remove(s.group); group.add(s.group);
+    s.group.scale.setScalar(1.1);
+    if (i === 0) { s.group.position.set(0, 0, -.02); s.group.rotation.y = 0; }
+    else { s.group.position.set(rand(-.2, .2), 0, -.95); s.group.rotation.y = Math.PI; }
+    seatSoldier(s, i > 0);
+    k.riders.push(s);
+  }
+  placeKrad(k);
+  return k;
+}
+const insideKrad = (k, x, z, r = 0) => insideTank(k, x, z, r);
+function placeKrad(k) {              // sit on the ground, tilted to follow the slope (the tracks bridge small dips)
+  const f = forward(k.yaw), rt = rightOf(k.yaw);
+  const at = (a, s) => groundY(k.x + f.x * a + rt.x * s, k.z + f.z * a + rt.z * s, true);
+  const front = at(1.15, 0), back = Math.max(at(-1.1, -.4), at(-1.1, .4)), left = Math.max(at(-.5, -.45), at(.2, -.45)), right = Math.max(at(-.5, .45), at(.2, .45));
+  k.y = Math.max((front + back) / 2, (left + right) / 2);
+  k.group.position.set(k.x, k.y, k.z);
+  k.group.rotation.set(-Math.atan2(front - back, 2.25), k.yaw, -Math.atan2(left - right, .9));
+}
+function kradFits(k, x, z, yaw) {
+  if (x < MINX + 2 || x > MAXX - 2 || z < MINZ + 2 || z > MAXZ - 2) return false;
+  const f = forward(yaw), rt = rightOf(yaw);
+  for (const a of [-1.45, 0, 1.4]) for (const s of [-.5, .5]) {
+    const px = x + f.x * a + rt.x * s, pz = z + f.z * a + rt.z * s;
+    if (blockedByWall(px, pz) || tanks.some(t => insideTank(t, px, pz, .1))) return false;
+  }
+  return !krads.some(o => o !== k && Math.hypot(o.x - x, o.z - z) < 2.4);
+}
+// drive a Kettenkrad: throttle -1..1 (back, nothing, forwards), steer -1..1 (right .. left)
+function driveKrad(k, throttle, steer) {
+  if (throttle > 0) k.speed += (KRAD_SPEED - k.speed) * .018;
+  else if (throttle < 0) k.speed = k.speed > .02 ? k.speed - .012 : k.speed + (-KRAD_SPEED * .35 - k.speed) * .03;
+  else k.speed *= .985;                                    // rolling to a stop
+  const grip = Math.min(1, Math.abs(k.speed) / .06) * Math.sign(k.speed);   // you can only turn while moving
+  const ny = k.yaw + steer * .035 * grip, f = forward(ny), nx = k.x + f.x * k.speed, nz = k.z + f.z * k.speed;
+  if (kradFits(k, nx, nz, ny)) { k.x = nx; k.z = nz; k.yaw = ny; k.stuck = 0; }
+  else {
+    if (Math.abs(k.speed) > .12) { play("clang", k.x, k.z); k.hp -= Math.abs(k.speed) * 60; if (k.rider) k.rider.shake = .5; }   // crashed into something
+    k.speed *= -.25; k.stuck++;
+  }
+  if (--k.hitCool <= 0 && Math.abs(k.speed) > .1) {        // running somebody down
+    const foes = k.side === "ally" || k.rider ? enemies : [...players.filter(p => p.alive && p.riding !== k), ...allies];
+    for (const s of foes) if (insideKrad(k, s.x, s.z, .35)) {
+      s.hp -= Math.abs(k.speed) * 600; s.sinceHit = 0; s.lastHit = { dx: f.x, dz: f.z }; k.hitCool = 20;
+      play("hit", s.x, s.z); bloodPuff(s.x, (s.y || 0) + 1, s.z, f.x, f.z);
+      k.speed *= .6;
+    }
+  }
+  placeKrad(k);
+  if (Math.abs(k.speed) > .03 && Math.random() < .35) {   // dust thrown up by the tracks, and exhaust
+    const b = forward(k.yaw);
+    addPuff(k.x - b.x * 1.4 + rand(-.4, .4), k.y + .2, k.z - b.z * 1.4, 0xb3a684, rand(25, 45), .03, { vy: .01, alpha: .25 + Math.abs(k.speed), size: .35 });
+  }
+}
+function kradAI(k) {                 // a German Kettenkrad: race towards your lines, stop, and let the soldiers jump off
+  const foes = [...players.filter(p => p.alive), ...allies];
+  let t = null, d = 1e9;
+  for (const o of foes) { const od = dist(k, o); if (od < d) { d = od; t = o; } }
+  if (!k.riders.length) { driveKrad(k, 0, 0); return; }  // empty: it just sits where it was left
+  k.age = (k.age || 0) + 1;
+  if (!t || d < 28 || k.stuck > 60 || k.age > 1500) {      // close enough, stuck, or driving round too long: brake and jump off
+    driveKrad(k, Math.abs(k.speed) > .02 ? -1 : 0, 0);
+    if (Math.abs(k.speed) < .025) unloadKrad(k);
+    return;
+  }
+  const want = Math.atan2(t.x - k.x, t.z - k.z), diff = Math.atan2(Math.sin(want - k.yaw), Math.cos(want - k.yaw));
+  if (k.reverse > 0) { k.reverse--; driveKrad(k, -1, -k.turnAway); return; }
+  if (k.stuck > 20) { k.reverse = 50; k.turnAway = diff > 0 ? 1 : -1; k.stuck = 21; }
+  driveKrad(k, Math.abs(diff) > 1.2 ? .4 : 1, Math.max(-1, Math.min(1, diff * 2)));
+}
+function unloadKrad(k) {             // the riders hop off either side and join the fight on foot
+  const rt = rightOf(k.yaw);
+  k.riders.forEach((r, i) => {
+    k.group.remove(r.group);
+    const e = makeEnemy(), side = i ? 1 : -1;
+    let x = k.x + rt.x * side * 1.3, z = k.z + rt.z * side * 1.3;
+    if (blocked(x, z, .5)) { x = k.x - forward(k.yaw).x * 2.3; z = k.z - forward(k.yaw).z * 2.3; }
+    e.x = x; e.z = z; e.y = groundY(x, z); e.yaw = k.yaw; e.cool = rand(40, 90);
+    e.group.position.set(x, e.y, z);
+    enemies.push(e);
+  });
+  k.riders = [];
+}
+function getOff(p) {                 // step off to the side of the Kettenkrad
+  const k = p.riding, rt = rightOf(k.yaw), f = forward(k.yaw);
+  for (const [a, s] of [[0, -1.2], [0, 1.2], [-2.2, 0], [2.2, 0]]) {
+    const x = k.x + f.x * a + rt.x * s, z = k.z + f.z * a + rt.z * s;
+    if (!blocked(x, z, p.r) && !insideKrad(k, x, z, p.r)) { p.x = x; p.z = z; break; }
+  }
+  p.y = supportY(p.x, p.z, k.y + 1); p.vy = 0; p.vx = p.vz = 0;
+  k.rider = null; p.riding = null; p.shownSlot = undefined;
+}
+function freeKradNear(p) {
+  let best = null, bd = 3;
+  for (const k of krads) { const d = dist(p, k); if (!k.dead && !k.rider && !k.riders.length && d < bd) { bd = d; best = k; } }
+  return best;
+}
+function wreckKrad(k) {
+  k.dead = true; k.speed = 0; k.mat.color.setHex(0x3a3632); k.mat.roughness = 1; k.mat.metalness = 0;
+  blast(k.x, k.y + .6, k.z, .6);
+  for (const r of k.riders) { k.group.remove(r.group); }   // anyone still on board is killed in the blast
+  k.riders = [];
+  if (k.rider) { const p = k.rider; getOff(p); p.hp -= 70; p.sinceHit = 0; p.hurtFlash = 1; }
+  if (k.side === "enemy") score += 150;
+}
+function updateKrads() {
+  for (const k of krads) {
+    if (k.dead) { if (++k.burn < 900 && Math.random() < .3) addPuff(k.x + rand(-.3, .3), k.y + .8, k.z + rand(-.3, .3), pick([0x2a2724, 0x3a3631]), rand(120, 200), .012, { vy: rand(.03, .05), alpha: .5, size: rand(.5, .9) }); continue; }
+    if (!k.rider) { if (k.side === "enemy") kradAI(k); else driveKrad(k, 0, 0); }
+    if (k.hp <= 0) wreckKrad(k);
+  }
+  kradSound();
+}
+function kradWave() {                // your side keeps KRADS_ALLY parked near the start; the Germans bring KRADS_ENEMY with riders
+  const lead = players[0];
+  for (let i = krads.filter(k => k.side === "ally" && !k.dead).length; i < KRADS_ALLY; i++) {
+    for (let tries = 0; tries < 80; tries++) {
+      const a = rand(0, 6.3), d = rand(5, 14), x = lead.x + Math.cos(a) * d, z = lead.z + Math.sin(a) * d, yaw = rand(0, 6.3);
+      if (trenchAt(x, z).d < TRENCH.half + 2.5 || Math.hypot(x - lead.x, z - lead.z) < 4) continue;
+      if (kradFits({ x, z }, x, z, yaw)) { krads.push(makeKrad("ally", x, z, yaw)); break; }
+    }
+  }
+  for (let i = 0; i < KRADS_ENEMY; i++) {
+    for (let tries = 0; tries < 80; tries++) {
+      const a = rand(0, 6.3), x = Math.max(MINX + 5, Math.min(MAXX - 5, lead.x + Math.cos(a) * (ARRIVE_DISTANCE + 10))), z = Math.max(MINZ + 5, Math.min(MAXZ - 5, lead.z + Math.sin(a) * (ARRIVE_DISTANCE + 10)));
+      const yaw = Math.atan2(lead.x - x, lead.z - z);
+      if (kradFits({ x, z }, x, z, yaw)) { krads.push(makeKrad("enemy", x, z, yaw, 2)); break; }
+    }
+  }
+}
+let kradEngine = null;
+function kradSound() {               // a buzzing motorbike engine whose note rises with speed
+  if (!sound.ctx || sound.muted) return;
+  if (!kradEngine) {
+    const ctx = sound.ctx, osc = ctx.createOscillator(), osc2 = ctx.createOscillator(), lp = ctx.createBiquadFilter(), g = ctx.createGain();
+    osc.type = "sawtooth"; osc2.type = "square"; lp.type = "lowpass"; lp.frequency.value = 900; g.gain.value = 0;
+    osc.connect(lp); osc2.connect(lp); lp.connect(g); g.connect(sound.master); osc.start(); osc2.start();
+    kradEngine = { osc, osc2, g };
+  }
+  let loud = 0, pitch = 55;
+  for (const k of krads) {
+    if (k.dead || (!k.rider && !k.riders.length)) continue;
+    const sp = Math.min(1, Math.abs(k.speed) / KRAD_SPEED), v = hearing(k.x, k.z).vol * (.35 + sp * .65);
+    if (v > loud) { loud = v; pitch = 55 + sp * 95; }
+  }
+  const t = sound.ctx.currentTime;
+  kradEngine.osc.frequency.setTargetAtTime(pitch, t, .08); kradEngine.osc2.frequency.setTargetAtTime(pitch * 1.01, t, .08);
+  kradEngine.g.gain.setTargetAtTime(loud * .16, t, .08);
 }
 
 // ---------- 4) THE SOLDIERS ----------
@@ -2148,7 +2402,7 @@ function makePlayer(num) {
   return {
     num, x: num === 1 ? -10 : 10, z: 0, y: groundY(num === 1 ? -10 : 10, 0), yaw: 0, r: .5, hp: MAX_HP, ammo: MAG_SIZE, reload: 0, cool: 0,
     alive: true, inv: newInventory(), slot: 0, bandaging: 0, shake: 0, vx: 0, vz: 0, jumpY: 0, vy: 0, land: 0, sinceHit: 0, healing: false, crouched: false, crouchAmt: 0, walk: 0, gait: 0, kick: 0, ...s, bar: makeHealthBar(s.group),
-    cam: new THREE.PerspectiveCamera(65, 1, .1, 280),
+    cam: new THREE.PerspectiveCamera(65, 1, .1, 330),
   };
 }
 function makeAlly() {
@@ -2168,7 +2422,12 @@ function makeEnemy() {
     const side = Math.floor(Math.random() * 4);
     x = side === 0 ? MINX + 2 : side === 1 ? MAXX - 2 : rand(MINX + 2, MAXX - 2);
     z = side === 2 ? MINZ + 2 : side === 3 ? MAXZ - 2 : rand(MINZ + 2, MAXZ - 2);
-  } while (blocked(x, z, .6));
+    const near = players.find(p => p.alive) || players[0];
+    if (near) {
+      const d = Math.hypot(x - near.x, z - near.z);
+      if (d > ARRIVE_DISTANCE) { x = near.x + (x - near.x) / d * ARRIVE_DISTANCE; z = near.z + (z - near.z) / d * ARRIVE_DISTANCE; }
+    }
+  } while (blocked(x, z, .6) || trenchAt(x, z).d < TRENCH.half + .5);
   const s = buildSoldier("german");
   const maxHp = 40 + wave * 4;
   return { x, z, y: groundY(x, z), vy: 0, jumpY: 0, yaw: 0, r: .5, hp: maxHp, cool: rand(60, 140), strafe: Math.random() < .5 ? 1 : -1,
@@ -2199,6 +2458,9 @@ function clearWorld() {
   for (const c of smokes) scene.remove(c.mesh);
   smokes = [];
   for (const t of tanks) scene.remove(t.group);
+  for (const k of krads) scene.remove(k.group);
+  krads = [];
+  if (kradEngine) kradEngine.g.gain.value = 0;
   for (const sh of shells) scene.remove(sh.mesh);
   tanks = []; shells = [];
   if (engineNode) engineNode.g.gain.value = 0;
@@ -2229,7 +2491,7 @@ function nextWave() {
   setTimeout(() => play("whistle"), 300);
   spawnQueue = 3 + wave * 2 + EXTRA_ENEMIES;
   while (players.length && allies.length < ALLIES) allies.push(makeAlly());   // reinforcements replace the fallen
-  if (players.length) tankWave();
+  if (players.length) { tankWave(); kradWave(); }
   spawnTimer = 0;
   waveTimer = 120;
   for (const p of players) {            // fallen soldiers come back, everyone patches up
@@ -2362,6 +2624,21 @@ function updatePlayer(p) {
     fwd = (keys.ArrowUp ? 1 : 0) - (keys.ArrowDown ? 1 : 0);
     turn = (keys.ArrowLeft ? 1 : 0) - (keys.ArrowRight ? 1 : 0);
   }
+  const rideKey = p.num === 1 ? keys.KeyF : keys.Semicolon;
+  if (rideKey && !p.rideHeld) {
+    if (p.riding) getOff(p);
+    else { const k = freeKradNear(p); if (k) { p.riding = k; k.rider = p; p.crouched = false; p.shownSlot = undefined; play("bolt", k.x, k.z, { vol: .5 }); } }
+  }
+  p.rideHeld = rideKey;
+  if (p.riding) {
+    const k = p.riding, steer = turn - (twoPlayer ? 0 : side);
+    driveKrad(k, fwd, Math.max(-1, Math.min(1, steer)));
+    p.x = k.x; p.z = k.z; p.y = k.y; p.yaw = k.yaw; p.vx = p.vz = 0; p.vy = 0; p.jumpY = 0;
+    p.sinceHit++;
+    p.healing = p.sinceHit > REGEN_DELAY && p.hp < MAX_HP;
+    if (p.healing) p.hp = Math.min(MAX_HP, p.hp + REGEN_RATE);
+    return;
+  }
   p.yaw += turn * TURN_SPEED;
   let tx = 0, tz = 0;                                    // the speed we want to reach
   if (fwd || side) {
@@ -2415,6 +2692,7 @@ function updatePlayer(p) {
 }
 
 function canSee(s, t) {
+  if (Math.hypot(t.x - s.x, t.z - s.z) > 70) { s.seeTarget = null; return s.sees = false; }
   if (s.seeTarget !== t || --s.seeTimer <= 0) { s.seeTarget = t; s.sees = clearShot(s, t) && !smokeBlocks(s, t); s.seeTimer = 8 + Math.floor(Math.random() * 6); }
   return s.sees;
 }
@@ -2443,7 +2721,7 @@ function updateAlly(a) {
   }
   a.crouched = !goHome && sees && a.pause > 0;          // kneel down to take aim
   stepHeight(a, false);
-  if (--a.cool <= 0 && t && sees && d < 36 && Math.abs(diff) < .3) {
+  if (--a.cool <= 0 && t && sees && d < 36 && Math.abs(diff) < .3 && !smokeBlocks(a, t)) {
     shoot(a, a.yaw, "ally", .03 + d * .004, t);
     a.cool = rand(60, 110);
   }
@@ -2467,7 +2745,7 @@ function updateEnemy(e) {
     if (Math.random() < .006) e.pause = rand(20, 50);
   }
   stepHeight(e, false);
-  if (--e.cool <= 0 && d < 36 && sees && Math.abs(diff) < .3) {
+  if (--e.cool <= 0 && d < 36 && sees && Math.abs(diff) < .3 && !smokeBlocks(e, t)) {
     // harder to hit you from far away, and harder still while you are on the move
     const moving = Math.min(1, Math.hypot(t.vx, t.vz) / PLAYER_SPEED);
     shoot(e, e.yaw, "enemy", .03 + d * .004 + moving * .05 + (t.crouched ? .03 : 0), t);   // crouching makes you a smaller target
@@ -2481,6 +2759,7 @@ function update() {
   enemies.forEach(updateEnemy);
   allies.forEach(updateAlly);
   updateTanks();
+  updateKrads();
   for (const p of players) if (p.alive) animateSoldier(p, false); else animateDeath(p);
   for (const e of enemies) animateSoldier(e, false);
   for (const a of allies) animateSoldier(a, false);
@@ -2531,7 +2810,7 @@ function update() {
   }
   fallen = fallen.filter(f => f.fall <= 680);
 
-  for (const p of players) if (p.alive && p.hp <= 0) { p.alive = false; p.hp = 0; startDeath(p, p.lastHit); }
+  for (const p of players) if (p.alive && p.hp <= 0) { if (p.riding) getOff(p); p.alive = false; p.hp = 0; startDeath(p, p.lastHit); }
 
   for (const p of puffs) {
     p.life--;
@@ -2555,7 +2834,7 @@ function update() {
     if (document.pointerLockElement) document.exitPointerLock();
     document.getElementById("overText").textContent = `You held out until wave ${wave} and scored ${score} points.`;
     document.getElementById("over").hidden = false;
-  } else if (spawnQueue === 0 && enemies.length === 0) {
+  } else if (spawnQueue === 0 && enemies.length === 0 && !krads.some(k => k.riders.length && !k.dead)) {
     score += wave * 250;
     nextWave();
   }
@@ -2775,6 +3054,7 @@ function animateSoldier(s, down) {   // runs once per game step, so it looks the
   s.upper.rotation.x = Math.max(-.1, ahead / SPRINT_SPEED * .22) + Math.sin(s.breath) * .012 * (1 - g) - s.kick * .12 + c * .12;
   s.upper.rotation.y = Math.sin(s.walk) * .07 * g;
   s.upper.position.z = -s.kick * .05;
+  if (s.riding) seatSoldier(s, false);                  // sitting on a Kettenkrad, hands on the handlebars
 }
 const camRay = new THREE.Raycaster(), camHead = new THREE.Vector3(), camWant = new THREE.Vector3(), camLook = new THREE.Vector3();
 function placeCamera(p) {
@@ -2783,7 +3063,8 @@ function placeCamera(p) {
   const want = floorY + (p.jumpY || 0) * .15 - (p.crouchAmt || 0) * .55;   // follow the floor; barely rise with a jump; drop with a crouch
   p.camY = p.camY === undefined ? want : p.camY + (want - p.camY) * .15;
   camHead.set(p.x, p.camY + 1.6, p.z);
-  camWant.set(p.x - f.x * 5.2 + r.x * 1.0, 3.0 + p.camY, p.z - f.z * 5.2 + r.z * 1.0);
+  const back = p.riding ? 6.5 : 5.2, up = p.riding ? 3.3 : 3.0;
+  camWant.set(p.x - f.x * back + r.x * 1.0, up + p.camY, p.z - f.z * back + r.z * 1.0);
   const gap = camWant.distanceTo(camHead);
   camRay.set(camHead, camWant.clone().sub(camHead).normalize()); camRay.far = gap;
   const hit = camRay.intersectObject(houseMesh)[0];   // a wall or the ceiling in the way: come in closer
@@ -2794,20 +3075,21 @@ function placeCamera(p) {
   if (p.shake > .01) { p.cam.position.x += rand(-1, 1) * p.shake * .3; p.cam.position.y += rand(-1, 1) * p.shake * .3; p.shake *= .9; }
   p.cam.lookAt(camLook);
 }
-const menuCam = new THREE.PerspectiveCamera(55, 1, .1, 450);
+const menuCam = new THREE.PerspectiveCamera(55, 1, .1, 600);
 let menuAngle = 0;
 
 function render() {
   windTime.value = performance.now() / 1000;
   const w = stage.clientWidth, h = stage.clientHeight;
   for (const p of players) { poseSoldier(p, !p.alive); updateHealthBar(p); showItem(p); }
+  if (players[0]) shadowsAround(players[0].x, players[0].z); else shadowsAround(0, 0);
   for (const e of enemies) poseSoldier(e, false);
   for (const a of allies) { poseSoldier(a, false); updateHealthBar(a); }
 
   renderer.setScissorTest(true);
   if (state === "menu" || !players.length) {
     menuAngle += .0015;                               // slow fly-around behind the menu
-    menuCam.position.set(Math.sin(menuAngle) * 80, 34, Math.cos(menuAngle) * 60);
+    menuCam.position.set(Math.sin(menuAngle) * 120, 50, Math.cos(menuAngle) * 90);
     menuCam.lookAt(0, 0, 0);
     sky.position.copy(menuCam.position);
     menuCam.aspect = w / h; menuCam.updateProjectionMatrix();
@@ -2838,12 +3120,15 @@ function updateHUD() {
     bar.parentElement.classList.toggle("healing", p.healing);   // the bar glows while health is coming back
     document.getElementById("hptext" + p.num).textContent = `${Math.ceil(p.hp)} / ${MAX_HP}`;
     updateHotbar(p);
+    const pr = document.getElementById("prompt" + p.num), key = p.num === 1 ? "F" : ";";
+    pr.textContent = p.riding ? key + " – get off the Kettenkrad · W/S speed, A/D steer" : p.alive && freeKradNear(p) ? key + " – ride the Kettenkrad" : "";
+    pr.hidden = !pr.textContent;
     p.hurtFlash = (p.hurtFlash || 0) * .93;               // red flash when hit, and a faint glow while health is low
     const low = p.alive ? clamp01((.35 - p.hp / MAX_HP) / .35) * .45 : .6;
     document.getElementById("hurt" + p.num).style.opacity = Math.max(p.hurtFlash * .75, low);
     document.getElementById("ammo" + p.num).textContent = p.reload ? "RELOADING..." : "AMMO " + "▮".repeat(p.ammo) + "▯".repeat(MAG_SIZE - p.ammo);
   });
-  document.getElementById("topline").textContent = `WAVE ${wave} · SCORE ${score} · ALLIES ${allies.length} · ENEMIES ${enemies.length + spawnQueue} · TANKS ${tanks.filter(t => !t.dead && t.side === "ally").length} v ${tanks.filter(t => !t.dead && t.side === "enemy").length}`;
+  document.getElementById("topline").textContent = `WAVE ${wave} · SCORE ${score} · ALLIES ${allies.length} · ENEMIES ${enemies.length + spawnQueue + krads.reduce((n, k) => n + k.riders.length, 0)} · TANKS ${tanks.filter(t => !t.dead && t.side === "ally").length} v ${tanks.filter(t => !t.dead && t.side === "enemy").length}`;
   const banner = document.getElementById("banner");
   banner.textContent = paused ? "PAUSED" : "WAVE " + wave;
   banner.style.opacity = paused || waveTimer > 0 ? 1 : 0;
@@ -2871,7 +3156,7 @@ function loop(now) {
 requestAnimationFrame(loop);
 
 // ---------- 7) CONTROLS ----------
-const gameKeys = ["Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Enter", "Slash", "Quote"];
+const gameKeys = ["Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Enter", "Slash", "Quote", "Semicolon"];
 let wheelSteps = 0;                // mouse wheel turns since the last game step (changes soldier 1's item)
 window.addEventListener("wheel", e => {
   if (state !== "play") return;
@@ -2898,7 +3183,7 @@ stage.addEventListener("mousedown", e => {
 });
 window.addEventListener("mouseup", () => { mouse.down = false; });
 document.addEventListener("mousemove", e => {
-  if (document.pointerLockElement === canvas && players[0] && !paused) players[0].yaw -= e.movementX * MOUSE_SENSITIVITY;
+  if (document.pointerLockElement === canvas && players[0] && !paused && !players[0].riding) players[0].yaw -= e.movementX * MOUSE_SENSITIVITY;
 });
 
 document.getElementById("btn1").onclick = () => { startSound(); startGame(1); };

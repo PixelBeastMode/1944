@@ -78,3 +78,6 @@ kbd { font-family: var(--mono); background: #3a3c2e; padding: 1px 6px; border-ra
 /* sound on/off label */
 .soundState { position: absolute; right: 10px; bottom: 10px; background: rgba(20, 22, 16, .72); padding: 4px 8px; font-size: 11px; color: var(--paper); pointer-events: none; }
 .soundState.off { color: #e0b030; }
+
+/* get on / get off hint */
+.prompt { position: absolute; bottom: 118px; left: 50%; transform: translateX(-50%); background: rgba(20, 22, 16, .8); padding: 5px 10px; font-size: 12px; white-space: nowrap; color: var(--paper); pointer-events: none; }

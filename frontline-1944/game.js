@@ -7,7 +7,7 @@
 //            5 game rules · 6 drawing · 7 controls
 // ============================================================
 
-const BUILD = 34;             // shown on screen, so you can tell the browser loaded the newest version
+const BUILD = 36;             // shown on screen, so you can tell the browser loaded the newest version
 document.querySelector(".tag").textContent += " · build " + BUILD;
 
 // ---------- 1) SETTINGS: change these to tweak the game ----------
@@ -31,6 +31,9 @@ const GRENADE_DAMAGE = 160;   // damage right next to the blast (less further aw
 const BANDAGE_HEAL = 60;      // health one bandage gives back
 const BANDAGE_TIME = 70;      // frames it takes to put a bandage on
 const SOUND_VOLUME = 0.9;      // overall loudness (press M in the game to mute)
+const ALLIES = 10;            // computer-controlled soldiers on your side (topped up each wave)
+const ALLY_HP = 100;
+const EXTRA_ENEMIES = 10;     // extra enemy soldiers added to every wave
 const MAG_SIZE = 8;
 const RELOAD_TIME = 70;
 const MINX = -80, MAXX = 80, MINZ = -52, MAXZ = 52;   // edges of the battlefield (inside the barbed wire)
@@ -205,7 +208,7 @@ function steer(o, tx, tz, agility) { // ease towards the wanted speed, so soldie
 }
 // can a bullet get from a to b? ha, hb: the heights it leaves from and arrives at (rifle, and the target's body)
 function clearShot(a, b, ha = (a.y || 0) + 1.5, hb = (b.y || 0) + (b.crouched ? .85 : 1.25)) {
-  const steps = Math.ceil(dist(a, b) / 0.8);
+  const steps = Math.ceil(dist(a, b) / 0.3);          // small steps, so thin tree trunks are not skipped
   for (let i = 1; i < steps; i++) {
     const k = i / steps, x = a.x + (b.x - a.x) * k, z = a.z + (b.z - a.z) * k, h = ha + (hb - ha) * k;
     if (wallStopsShot(x, z, h) || h < groundY(x, z)) return false;
@@ -482,6 +485,7 @@ function mergeParts(parts, dapple = .24, smooth = false) {
   return geo;
 }
 const pick = list => list[Math.floor(Math.random() * list.length)];
+const FIELD_TREES = 28;      // trees standing inside the battlefield
 const windTime = { value: 0 };     // drives grass and leaves swaying in the wind
 const outsideFence = (x, z, gap) => Math.abs(x) > MAXX + gap || Math.abs(z) > MAXZ + gap;
 
@@ -602,15 +606,17 @@ function leafCluster(L, center, radius, crownCenter, count, tint, cardSize = 1.1
   const B = plantBuilder(), L = plantBuilder(), N = plantBuilder();
   const barks = [0xd6ccbc, 0xe2d6c2, 0xc8bfb0], deadBark = [0xe8e2d8, 0xd4ccc0];   // tints: the bark texture carries the colour
   const leafTints = [0xdfe8c8, 0xeaf0cc, 0xd2e0bc, 0xf2eccc].map(h => new THREE.Color(h));
-  for (let i = 0; i < 240; i++) {
-    let x, z;
-    do { x = rand(-WORLD_X + 8, WORLD_X - 8); z = rand(-WORLD_Z + 8, WORLD_Z - 8); } while (!outsideFence(x, z, 4));
-    const y = groundY(x, z) - .1, kind = Math.random();
+  // grows one tree at (x, z). kind 0..1 picks broadleaf (< .45), pine (< .75) or shattered.
+  // Returns the trunk's radius and height, so trees in the battlefield can block soldiers and bullets.
+  function growTree(x, z, kind) {
+    const y = groundY(x, z) - .1;
+    let trunk;
     if (kind < .45) {                                 // broadleaf tree: trunk, limbs, twigs and a crown of leaves
       const h = rand(2.8, 4.5), r = rand(.2, .32), bark = pick(barks), tint = pick(leafTints);
       const lean = V(rand(-.15, .15), 1, rand(-.15, .15)).normalize();
       const top = V(x, y, z).addScaledVector(lean, h);
       B.branch([x, y - .2, z], top.toArray(), r * 1.25, r * .7, bark, 9);
+      trunk = { r: r * 1.15, h };
       const crownCenter = top.clone().add(V(0, 1.6, 0)), clusters = [];
       const limbs = 3 + Math.floor(Math.random() * 3);
       for (let b = 0; b < limbs; b++) {
@@ -630,7 +636,9 @@ function leafCluster(L, center, radius, crownCenter, count, tint, cardSize = 1.1
       leafCluster(L, crownCenter, 1.2, crownCenter, 14, tint);   // fill the middle of the crown
     } else if (kind < .75) {                          // pine: straight trunk, whorls of drooping branches covered in needles
       const h = rand(6, 9.5), bark = pick(barks);
-      B.branch([x, y - .2, z], [x, y + h, z], rand(.18, .26), .04, bark, 8);
+      const pr = rand(.18, .26);
+      B.branch([x, y - .2, z], [x, y + h, z], pr, .04, bark, 8);
+      trunk = { r: pr, h };
       for (let wy = 1.6; wy < h - .3; wy += rand(.45, .6)) {
         const k = 1 - (wy - 1.6) / (h - 1.6), n = 5 + Math.floor(Math.random() * 3), off = rand(0, 6.3);
         for (let b = 0; b < n; b++) {
@@ -647,6 +655,7 @@ function leafCluster(L, center, radius, crownCenter, count, tint, cardSize = 1.1
     } else {                                          // tree shattered by shellfire: bare trunk, splintered top, dead limbs
       const h = rand(2.5, 6), r = rand(.2, .32), bark = pick(deadBark);
       B.branch([x, y - .2, z], [x + rand(-.3, .3), y + h, z + rand(-.3, .3)], r, r * .7, bark, 8);
+      trunk = { r, h };
       for (let s = 0; s < 5; s++) {                   // splinters sticking up from the break
         const a = rand(0, 6.3), d = r * .5;
         B.branch([x + Math.cos(a) * d, y + h - .1, z + Math.sin(a) * d], [x + Math.cos(a) * d * 1.4, y + h + rand(.3, 1), z + Math.sin(a) * d * 1.4], r * .3, .01, 0xfff0d8, 4);   // pale splintered wood
@@ -656,6 +665,32 @@ function leafCluster(L, center, radius, crownCenter, count, tint, cardSize = 1.1
         B.branch(start.toArray(), end.toArray(), r * .3, .02, bark, 5);
       }
     }
+    return trunk;
+  }
+
+  // the woods outside the wire
+  for (let i = 0; i < 240; i++) {
+    let x, z;
+    do { x = rand(-WORLD_X + 8, WORLD_X - 8); z = rand(-WORLD_Z + 8, WORLD_Z - 8); } while (!outsideFence(x, z, 4));
+    growTree(x, z, Math.random());
+  }
+
+  // trees standing in the battlefield itself: mostly shattered by shellfire, some still alive.
+  // Their trunks are solid, so you can take cover behind them.
+  const fieldTrees = [];
+  for (let tries = 0; fieldTrees.length < FIELD_TREES && tries < 4000; tries++) {
+    const x = rand(MINX + 4, MAXX - 4), z = rand(MINZ + 4, MAXZ - 4);
+    if (wallGap(x, z) < 4 || inRect(x, z, HOUSE, 4) || trenchAt(x, z).d < 4.5 || track(x, z) > .05) continue;
+    if (Math.hypot(Math.abs(x) - 10, z) < 9) continue;                                 // keep the start positions open
+    if (craters.some(c => Math.hypot(x - c.x, z - c.z) < c.r + 1.5)) continue;
+    if (fieldTrees.some(t => Math.hypot(x - t.x, z - t.z) < 7)) continue;
+    fieldTrees.push({ x, z });
+  }
+  for (const t of fieldTrees) {
+    const roll = Math.random(), kind = roll < .5 ? rand(.76, 1) : roll < .85 ? rand(0, .44) : rand(.46, .74);
+    const { r, h } = growTree(t.x, t.z, kind);
+    const half = r * .9;
+    walls.push({ x: t.x - half, z: t.z - half, w: half * 2, d: half * 2, type: "tree", top: groundY(t.x, t.z) + h });
   }
   B.mesh(barkMat); L.mesh(leafMat); N.mesh(needleMat);
 })();
@@ -1080,7 +1115,7 @@ function explode(g) {
   scene.remove(g.mesh);
   const at = { x: g.x, z: g.z, y: g.y };
   // anyone close enough, and not behind a wall, gets hurt: less the further away they are
-  for (const v of [...enemies, ...players.filter(p => p.alive)]) {
+  for (const v of [...enemies, ...players.filter(p => p.alive), ...allies]) {
     const d = Math.hypot(v.x - g.x, v.z - g.z, ((v.y || 0) + .9) - g.y);
     if (d > GRENADE_RADIUS || !clearShot(at, v, g.y + .5, (v.y || 0) + 1)) continue;
     const hurt = GRENADE_DAMAGE * (1 - d / GRENADE_RADIUS) * (v.num ? .6 : 1);   // your own grenade hurts you less
@@ -1722,7 +1757,7 @@ function makeHealthBar(group) {
   return { back, fill };
 }
 function updateHealthBar(p) {
-  const f = Math.max(.001, p.hp / MAX_HP), { back, fill } = p.bar;
+  const f = Math.max(.001, p.hp / (p.maxHp || MAX_HP)), { back, fill } = p.bar;
   back.visible = fill.visible = p.alive;
   fill.scale.x = .84 * f;
   fill.center.x = .5 / f;                             // keeps the bar's left end fixed as it shrinks
@@ -1738,6 +1773,17 @@ function makePlayer(num) {
     cam: new THREE.PerspectiveCamera(65, 1, .1, 280),
   };
 }
+function makeAlly() {
+  const lead = players[0], s = buildSoldier("british");
+  let x, z, tries = 0;
+  do { x = lead.x + rand(-14, 10); z = lead.z + rand(-14, 14); }       // spread out around you
+  while ((blocked(x, z, .6) || Math.hypot(x - lead.x, z - lead.z) < 3 || trenchAt(x, z).d < TRENCH.half + .3) && ++tries < 50);
+  const a = { ally: true, alive: true, x, z, y: groundY(x, z), vy: 0, jumpY: 0, yaw: 0, r: .5, hp: ALLY_HP, maxHp: ALLY_HP,
+    cool: rand(30, 90), strafe: Math.random() < .5 ? 1 : -1, vx: 0, vz: 0, pause: 0, walk: rand(0, 6), gait: 0, kick: 0, flash: 0,
+    post: { dx: x - lead.x, dz: z - lead.z }, ...s };
+  a.bar = makeHealthBar(a.group);
+  return a;
+}
 function makeEnemy() {
   let x, z;
   do {                                                  // arrive from a random edge
@@ -1752,7 +1798,7 @@ function makeEnemy() {
 }
 
 // ---------- 5) GAME RULES ----------
-let players = [], enemies = [], fallen = [], bullets = [], puffs = [];
+let players = [], allies = [], enemies = [], fallen = [], bullets = [], puffs = [];
 let wave = 0, score = 0, spawnQueue = 0, spawnTimer = 0, waveTimer = 0;
 let state = "menu", paused = false, twoPlayer = false;
 const keys = {};
@@ -1764,7 +1810,7 @@ const enemyTracer = new THREE.MeshBasicMaterial({ color: 0xff9a3c });
 const puffGeo = new THREE.SphereGeometry(.3, 8, 6);
 
 function clearWorld() {
-  for (const o of [...players, ...enemies, ...fallen]) { scene.remove(o.group); if (o.rifle && o.rifle.parent === scene) scene.remove(o.rifle); }
+  for (const o of [...players, ...allies, ...enemies, ...fallen]) { scene.remove(o.group); if (o.rifle && o.rifle.parent === scene) scene.remove(o.rifle); }
   for (const b of bullets) scene.remove(b.mesh);
   for (const p of puffs) scene.remove(p.mesh);
   for (const c of casings) scene.remove(c.mesh);
@@ -1772,7 +1818,7 @@ function clearWorld() {
   for (const o of [...players, ...fallen]) removeStain(o);
   for (const g of grenades) scene.remove(g.mesh);
   grenades = [];
-  players = []; enemies = []; fallen = []; bullets = []; puffs = [];
+  players = []; allies = []; enemies = []; fallen = []; bullets = []; puffs = [];
 }
 function startGame(n) {
   clearWorld();
@@ -1780,6 +1826,7 @@ function startGame(n) {
   players = [makePlayer(1)];
   if (twoPlayer) players.push(makePlayer(2));
   wave = 0; score = 0; paused = false;
+  for (let i = 0; i < ALLIES; i++) allies.push(makeAlly());
   nextWave();
   state = "play";
   document.getElementById("menu").hidden = true;
@@ -1796,7 +1843,8 @@ function startGame(n) {
 function nextWave() {
   wave++;
   setTimeout(() => play("whistle"), 300);
-  spawnQueue = 3 + wave * 2;
+  spawnQueue = 3 + wave * 2 + EXTRA_ENEMIES;
+  while (players.length && allies.length < ALLIES) allies.push(makeAlly());   // reinforcements replace the fallen
   spawnTimer = 0;
   waveTimer = 120;
   for (const p of players) {            // fallen soldiers come back, everyone patches up
@@ -1980,9 +2028,39 @@ function updatePlayer(p) {
   }
 }
 
+function updateAlly(a) {
+  if (a.flash > 0 && --a.flash === 0) a.uni.emissive.setHex(0);
+  const lead = players.find(p => p.alive) || players[0];
+  let t = null, d = 1e9;
+  for (const e of enemies) { const de = dist(a, e); if (de < d) { d = de; t = e; } }
+  const homeX = lead.x + a.post.dx * .7, homeZ = lead.z + a.post.dz * .7, fromHome = Math.hypot(a.x - homeX, a.z - homeZ);
+  const goHome = !t || (fromHome > 30 && d > 20);    // no enemy about, or wandered too far: fall back towards you
+  const tx = goHome ? homeX : t.x, tz = goHome ? homeZ : t.z;
+  const want = Math.atan2(tx - a.x, tz - a.z);
+  const diff = Math.atan2(Math.sin(want - a.yaw), Math.cos(want - a.yaw));
+  a.yaw += Math.max(-ENEMY_TURN, Math.min(ENEMY_TURN, diff));
+  const sees = t && !goHome && clearShot(a, t);
+  if (goHome) {
+    const f = forward(a.yaw), go = fromHome > 3 ? ENEMY_SPEED * (fromHome > 12 ? 1.3 : 1) : 0;
+    steer(a, f.x * go, f.z * go, AGILITY * .6);
+  } else if (a.pause > 0) { a.pause--; steer(a, 0, 0, AGILITY * .6); }
+  else if (d > 22 || !sees) {
+    const f = forward(a.yaw); steer(a, f.x * ENEMY_SPEED, f.z * ENEMY_SPEED, AGILITY * .6);
+  } else {
+    const r = rightOf(a.yaw); steer(a, r.x * a.strafe * .06, r.z * a.strafe * .06, AGILITY * .6);
+    if (Math.random() < .012) a.strafe *= -1;
+    if (Math.random() < .008) a.pause = rand(25, 60);
+  }
+  a.crouched = !goHome && sees && a.pause > 0;          // kneel down to take aim
+  stepHeight(a, false);
+  if (--a.cool <= 0 && t && sees && d < 36 && Math.abs(diff) < .3) {
+    shoot(a, a.yaw, "ally", .03 + d * .004, t);
+    a.cool = rand(60, 110);
+  }
+}
 function updateEnemy(e) {
   if (e.flash > 0 && --e.flash === 0) e.uni.emissive.setHex(0);
-  const targets = players.filter(p => p.alive);
+  const targets = [...players.filter(p => p.alive), ...allies];
   if (!targets.length) return;
   const t = targets.reduce((a, b) => dist(e, a) < dist(e, b) ? a : b);
   const d = dist(e, t);
@@ -2011,8 +2089,10 @@ function update() {
   if (state !== "play" || paused) return;
   players.forEach(updatePlayer);
   enemies.forEach(updateEnemy);
+  allies.forEach(updateAlly);
   for (const p of players) if (p.alive) animateSoldier(p, false); else animateDeath(p);
   for (const e of enemies) animateSoldier(e, false);
+  for (const a of allies) animateSoldier(a, false);
 
   if (waveTimer > 0) waveTimer--;
   if (spawnQueue > 0 && --spawnTimer <= 0) { enemies.push(makeEnemy()); spawnQueue--; spawnTimer = 50; }
@@ -2022,9 +2102,10 @@ function update() {
     b.y = b.h0 + (b.h1 - b.h0) * b.trav / b.reach;      // a straight line from the muzzle towards the target
     b.mesh.position.set(b.x, b.y, b.z);
     if (b.x < MINX || b.x > MAXX || b.z < MINZ || b.z > MAXZ) b.life = 0;
-    if (wallStopsShot(b.x, b.z, b.y)) { b.life = 0; play("dirt", b.x, b.z); addPuff(b.x, Math.min(b.y, 2.5), b.z, 0xd6c9a0, 18, .06); }   // dust off the wall
+    const sweptWall = [.25, .5, .75].some(k => wallStopsShot(b.x - b.vx * k, b.z - b.vz * k, b.y));   // check along the whole step too
+    if (sweptWall || wallStopsShot(b.x, b.z, b.y)) { b.life = 0; play("dirt", b.x, b.z); addPuff(b.x, Math.min(b.y, 2.5), b.z, 0xd6c9a0, 18, .06); }   // dust off the wall
     else if (b.y < groundY(b.x, b.z)) { b.life = 0; play("dirt", b.x, b.z, { vol: .7 }); addPuff(b.x, groundY(b.x, b.z) + .1, b.z, 0x9a8a6a, 14, .05); }  // kicks up dirt
-    const victims = b.team === "ally" ? enemies : players.filter(p => p.alive);
+    const victims = b.team === "ally" ? enemies : [...players.filter(p => p.alive), ...allies];
     if (b.team === "enemy" && b.life > 0 && !b.whizzed) for (const p of players)   // a near miss whizzes past your ear
       if (p.alive && dist(b, p) < 1.8 && dist(b, p) > .6) { b.whizzed = true; play("whiz", b.x, b.z); }
     for (const v of victims) {
@@ -2045,6 +2126,8 @@ function update() {
 
   for (const e of enemies) if (e.hp <= 0) { score += 100; e.fall = 0; startDeath(e, e.lastHit); fallen.push(e); }
   enemies = enemies.filter(e => e.hp > 0);
+  for (const a of allies) if (a.hp <= 0) { a.alive = false; a.fall = 0; a.bar.back.visible = a.bar.fill.visible = false; startDeath(a, a.lastHit); fallen.push(a); }
+  allies = allies.filter(a => a.hp > 0);
   for (const f of fallen) {                 // the dead lie where they fell for a while, then sink away
     f.fall++;
     animateDeath(f);
@@ -2331,6 +2414,7 @@ function render() {
   const w = stage.clientWidth, h = stage.clientHeight;
   for (const p of players) { poseSoldier(p, !p.alive); updateHealthBar(p); showItem(p); }
   for (const e of enemies) poseSoldier(e, false);
+  for (const a of allies) { poseSoldier(a, false); updateHealthBar(a); }
 
   renderer.setScissorTest(true);
   if (state === "menu" || !players.length) {
@@ -2371,7 +2455,7 @@ function updateHUD() {
     document.getElementById("hurt" + p.num).style.opacity = Math.max(p.hurtFlash * .75, low);
     document.getElementById("ammo" + p.num).textContent = p.reload ? "RELOADING..." : "AMMO " + "▮".repeat(p.ammo) + "▯".repeat(MAG_SIZE - p.ammo);
   });
-  document.getElementById("topline").textContent = `WAVE ${wave} · SCORE ${score} · ENEMIES ${enemies.length + spawnQueue}`;
+  document.getElementById("topline").textContent = `WAVE ${wave} · SCORE ${score} · ALLIES ${allies.length} · ENEMIES ${enemies.length + spawnQueue}`;
   const banner = document.getElementById("banner");
   banner.textContent = paused ? "PAUSED" : "WAVE " + wave;
   banner.style.opacity = paused || waveTimer > 0 ? 1 : 0;

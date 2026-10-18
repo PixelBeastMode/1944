@@ -11,6 +11,8 @@
 const PLAYER_SPEED = 0.15;    // map units per frame (60 frames = 1 second)
 const SPRINT_SPEED = 0.23;    // holding sprint while moving forward
 const AGILITY = 0.28;         // how quickly soldiers speed up and stop (1 = instant)
+const JUMP_POWER = 0.1;       // how fast you leave the ground (higher = jump higher)
+const GRAVITY = 0.0085;       // how fast you come back down
 const ENEMY_SPEED = 0.08;
 const ENEMY_TURN = 0.12;      // how fast enemies swing round to face you
 const BULLET_SPEED = 1.1;
@@ -900,7 +902,7 @@ function makePlayer(num) {
   const s = buildSoldier(num === 1 ? "british" : "american");
   return {
     num, x: num === 1 ? -10 : 10, z: 0, yaw: 0, r: .5, hp: MAX_HP, ammo: MAG_SIZE, reload: 0, cool: 0,
-    alive: true, vx: 0, vz: 0, walk: 0, gait: 0, kick: 0, ...s, bar: makeHealthBar(s.group),
+    alive: true, vx: 0, vz: 0, jumpY: 0, vy: 0, land: 0, walk: 0, gait: 0, kick: 0, ...s, bar: makeHealthBar(s.group),
     cam: new THREE.PerspectiveCamera(65, 1, .1, 200),
   };
 }
@@ -960,7 +962,7 @@ function nextWave() {
   spawnTimer = 0;
   waveTimer = 120;
   for (const p of players) {            // fallen soldiers come back, everyone patches up
-    if (!p.alive) { p.alive = true; p.hp = MAX_HP / 2; p.group.rotation.x = 0; p.group.position.y = 0; p.vx = p.vz = 0; }
+    if (!p.alive) { p.alive = true; p.hp = MAX_HP / 2; p.group.rotation.x = 0; p.group.position.y = 0; p.vx = p.vz = 0; p.jumpY = p.vy = 0; }
     else p.hp = Math.min(MAX_HP, p.hp + MAX_HP / 4);
   }
 }
@@ -1041,6 +1043,7 @@ function updatePlayer(p) {
   if (!p.alive) return;
   let fwd = 0, side = 0, turn = 0;
   const sprint = p.num === 1 ? keys.ShiftLeft : keys.ControlRight;
+  const jumpKey = p.num === 1 ? keys.KeyJ : keys.Slash;
   if (!twoPlayer) {
     fwd = (keys.KeyW ? 1 : 0) - (keys.KeyS ? 1 : 0);
     side = (keys.KeyD ? 1 : 0) - (keys.KeyA ? 1 : 0);
@@ -1060,7 +1063,16 @@ function updatePlayer(p) {
     tx = (f.x * fwd + r.x * side) / len * speed;
     tz = (f.z * fwd + r.z * side) / len * speed;
   }
-  steer(p, tx, tz, AGILITY);
+  const inAir = p.jumpY > 0 || p.vy > 0;
+  steer(p, tx, tz, inAir ? AGILITY * .12 : AGILITY);   // in the air you mostly keep the speed you jumped with
+
+  // jumping: press the key while standing on the ground (let go and press again for the next jump)
+  if (jumpKey && !p.jumpHeld && !inAir) { p.vy = JUMP_POWER; p.land = 0; }
+  p.jumpHeld = jumpKey;
+  if (p.vy !== 0 || p.jumpY > 0) {
+    p.jumpY += p.vy; p.vy -= GRAVITY;
+    if (p.jumpY <= 0) { p.land = Math.min(1, -p.vy / JUMP_POWER); p.jumpY = 0; p.vy = 0; }   // touch down: bend the knees
+  }
 
   if (p.cool > 0) p.cool--;
   if (p.reload > 0) { if (--p.reload === 0) p.ammo = MAG_SIZE; return; }
@@ -1163,7 +1175,7 @@ function update() {
 
 // ---------- 6) DRAWING ----------
 function poseSoldier(s, down) {
-  s.group.position.set(s.x, groundY(s.x, s.z), s.z);                  // stand on the bumpy ground
+  s.group.position.set(s.x, groundY(s.x, s.z) + (s.jumpY || 0), s.z);  // stand on the bumpy ground (or jump off it)
   s.group.rotation.y = s.yaw;
   if (down) s.group.rotation.x = Math.max(s.group.rotation.x - .08, -Math.PI / 2);
 }
@@ -1196,8 +1208,17 @@ function animateSoldier(s, down) {   // runs once per game step, so it looks the
     s.hips[i].rotation.z = (i ? 1 : -1) * Math.abs(Math.sin(s.walk)) * .22 * Math.abs(sa) * on;   // feet apart, together
     s.knees[i].rotation.x = (Math.max(0, Math.cos(t)) * (.4 + g * .9) * (.4 + .6 * Math.abs(fa)) + g * .15) * on;
   }
+  // jumping: tuck the legs up in the air, then bend the knees to soak up the landing
+  s.air = (s.air || 0) + ((s.jumpY > 0 ? 1 : 0) - (s.air || 0)) * .35;
+  s.land = (s.land || 0) * .82;
+  const bend = Math.max(s.air, s.land * .8);
+  if (bend > .01) for (let i = 0; i < 2; i++) {
+    const lead = i ? .25 : -.1;                          // one leg a little ahead of the other
+    s.hips[i].rotation.x = s.hips[i].rotation.x * (1 - bend) + (-.75 - lead) * bend;
+    s.knees[i].rotation.x = s.knees[i].rotation.x * (1 - bend) + (1.15 + lead) * bend;
+  }
   // body dips as the legs spread, and rolls a little into sideways steps
-  s.body.position.y = -Math.abs(Math.sin(s.walk)) * .05 * Math.min(1, g * 4) - g * .04;
+  s.body.position.y = (-Math.abs(Math.sin(s.walk)) * .05 * Math.min(1, g * 4) - g * .04) * (1 - s.air) - s.land * .1;
   s.body.rotation.z = across / SPRINT_SPEED * .12;
   // upper body: lean into the run, small sway with the steps, breathing, recoil
   s.upper.rotation.x = Math.max(-.1, ahead / SPRINT_SPEED * .22) + Math.sin(s.breath) * .012 * (1 - g) - s.kick * .12;
@@ -1207,7 +1228,8 @@ function animateSoldier(s, down) {   // runs once per game step, so it looks the
 function placeCamera(p) {
   const f = forward(p.yaw), r = rightOf(p.yaw);
   const gy = groundY(p.x, p.z);
-  p.camY = p.camY === undefined ? gy : p.camY + (gy - p.camY) * .08;   // follow the ground smoothly
+  const want = gy + (p.jumpY || 0) * .15;             // follow the ground smoothly; barely rise with a jump, so you see it
+  p.camY = p.camY === undefined ? want : p.camY + (want - p.camY) * .15;
   p.cam.position.set(p.x - f.x * 5.2 + r.x * 1.0, 3.0 + p.camY, p.z - f.z * 5.2 + r.z * 1.0);
   p.cam.lookAt(p.x + f.x * 10, 1.3 + p.camY, p.z + f.z * 10);
 }
@@ -1278,7 +1300,7 @@ function loop(now) {
 requestAnimationFrame(loop);
 
 // ---------- 7) CONTROLS ----------
-const gameKeys = ["Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Enter"];
+const gameKeys = ["Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Enter", "Slash"];
 window.addEventListener("keydown", e => {
   if (state === "play" && gameKeys.includes(e.code)) e.preventDefault();
   if (e.code === "KeyP" && state === "play") paused = !paused;

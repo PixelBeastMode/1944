@@ -6,7 +6,7 @@
 <title>Frontline 1944</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Stardos+Stencil:wght@400;700&family=IBM+Plex+Mono:wght@400;600&display=swap">
-<link rel="stylesheet" href="style.css?v=15">
+<link rel="stylesheet" href="style.css?v=25">
 </head>
 <body>
 <div class="wrap">
@@ -24,7 +24,12 @@
         <div class="hprow"><div class="bar"><i id="hp1"></i></div><span id="hptext1"></span></div>
         <span id="ammo1" style="color: var(--paper)"></span>
       </div>
+      <svg class="binoc" id="binoc1" viewBox="0 0 160 100" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
+        <defs><mask id="binocMask1"><rect width="160" height="100" fill="white"/><circle cx="57" cy="50" r="35" fill="black"/><circle cx="103" cy="50" r="35" fill="black"/></mask></defs>
+        <rect width="160" height="100" fill="#060606" mask="url(#binocMask1)"/>
+      </svg>
       <div class="cross"></div>
+      <div class="hotbar" id="hotbar1"></div>
     </div>
     <div class="pane" id="pane2" hidden>
       <div class="info" style="color: var(--sky)">
@@ -32,7 +37,12 @@
         <div class="hprow"><div class="bar"><i id="hp2"></i></div><span id="hptext2"></span></div>
         <span id="ammo2" style="color: var(--paper)"></span>
       </div>
+      <svg class="binoc" id="binoc2" viewBox="0 0 160 100" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
+        <defs><mask id="binocMask2"><rect width="160" height="100" fill="white"/><circle cx="57" cy="50" r="35" fill="black"/><circle cx="103" cy="50" r="35" fill="black"/></mask></defs>
+        <rect width="160" height="100" fill="#060606" mask="url(#binocMask2)"/>
+      </svg>
       <div class="cross"></div>
+      <div class="hotbar" id="hotbar2"></div>
     </div>
     <div class="topline" id="topline" hidden></div>
     <div class="banner" id="banner"></div>
@@ -54,14 +64,14 @@
   </div>
 
   <div class="controls">
-    <div><b>1 PLAYER</b><br>Move <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> · Sprint: hold left <kbd>Shift</kbd> · Jump <kbd>J</kbd> · Crouch <kbd>C</kbd> · Click the map, then aim with the mouse (up and down too) · Shoot: click or <kbd>Space</kbd> · Reload <kbd>R</kbd> · No mouse? Turn with <kbd>←</kbd><kbd>→</kbd>, look up and down with <kbd>↑</kbd><kbd>↓</kbd></div>
-    <div><b>2 PLAYERS (split screen)</b><br>Soldier 1: <kbd>W</kbd><kbd>S</kbd> walk, <kbd>A</kbd><kbd>D</kbd> turn, <kbd>Space</kbd> shoot, <kbd>R</kbd> reload, left <kbd>Shift</kbd> sprint, <kbd>J</kbd> jump, <kbd>C</kbd> crouch<br>Soldier 2: arrows walk and turn, <kbd>Enter</kbd> shoot, right <kbd>Shift</kbd> reload, right <kbd>Ctrl</kbd> sprint, <kbd>/</kbd> jump, <kbd>.</kbd> crouch</div>
+    <div><b>1 PLAYER</b><br>Move <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> · Sprint: hold left <kbd>Shift</kbd> · Jump <kbd>J</kbd> · Crouch <kbd>C</kbd> · Click the map, then aim with the mouse · Use item (shoot, throw, bandage, look): click or <kbd>Space</kbd> · Items <kbd>1</kbd>–<kbd>4</kbd> or mouse wheel · Reload <kbd>R</kbd> · No mouse? Turn with <kbd>←</kbd><kbd>→</kbd></div>
+    <div><b>2 PLAYERS (split screen)</b><br>Soldier 1: <kbd>W</kbd><kbd>S</kbd> walk, <kbd>A</kbd><kbd>D</kbd> turn, <kbd>Space</kbd> use item, <kbd>1</kbd>–<kbd>4</kbd> items, <kbd>R</kbd> reload, left <kbd>Shift</kbd> sprint, <kbd>J</kbd> jump, <kbd>C</kbd> crouch<br>Soldier 2: arrows walk and turn, <kbd>Enter</kbd> use item, <kbd>'</kbd> next item, right <kbd>Shift</kbd> reload, right <kbd>Ctrl</kbd> sprint, <kbd>/</kbd> jump, <kbd>.</kbd> crouch</div>
     <div><b>GAME</b><br>Pause <kbd>P</kbd> · A fallen soldier returns at the start of the next wave · Needs a keyboard</div>
   </div>
 </div>
 
 <!-- Three.js draws the 3D world. It loads from the internet, so you need to be online. -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-<script src="game.js?v=22"></script>
+<script src="game.js?v=26"></script>
 </body>
 </html>

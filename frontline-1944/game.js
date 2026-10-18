@@ -7,7 +7,7 @@
 //            5 game rules · 6 drawing · 7 controls
 // ============================================================
 
-const BUILD = 21;             // shown on screen, so you can tell the browser loaded the newest version
+const BUILD = 25;             // shown on screen, so you can tell the browser loaded the newest version
 document.querySelector(".tag").textContent += " · build " + BUILD;
 
 // ---------- 1) SETTINGS: change these to tweak the game ----------
@@ -22,10 +22,14 @@ const ENEMY_TURN = 0.12;      // how fast enemies swing round to face you
 const BULLET_SPEED = 1.1;
 const TURN_SPEED = 0.045;     // how fast the keys turn you
 const MOUSE_SENSITIVITY = 0.0025;
-const INVERT_LOOK = true;     // true: moving down on the mouse or trackpad looks up
 const MAX_HP = 180;          // how much health a soldier has
 const REGEN_DELAY = 150;      // frames without being hit before health starts coming back (60 = 1 second)
 const REGEN_RATE = 0.15;      // health regained per frame while recovering (0.15 = 9 per second)
+const GRENADE_FUSE = 150;     // frames from throwing a grenade to the bang (60 = 1 second)
+const GRENADE_RADIUS = 6;     // how far a grenade blast reaches
+const GRENADE_DAMAGE = 160;   // damage right next to the blast (less further away)
+const BANDAGE_HEAL = 60;      // health one bandage gives back
+const BANDAGE_TIME = 70;      // frames it takes to put a bandage on
 const MAG_SIZE = 8;
 const RELOAD_TIME = 70;
 const MINX = -48, MAXX = 48, MINZ = -30, MAXZ = 30;   // edges of the battlefield
@@ -660,6 +664,136 @@ function updateCasings() {
   casings = casings.filter(c => c.life > 0);
 }
 
+// ---------- ITEMS: the hotbar (rifle, grenades, bandages, binoculars) ----------
+const ITEMS = {
+  rifle:      { name: "Rifle" },
+  grenade:    { name: "Grenade", start: 3, perWave: 2, max: 5 },
+  bandage:    { name: "Bandage", start: 2, perWave: 1, max: 4 },
+  binoculars: { name: "Binoculars" },
+};
+const newInventory = () => ["rifle", "grenade", "bandage", "binoculars"].map(id => ({ id, count: ITEMS[id].start }));
+
+// small models of the items, held in the right hand (each built once, then shared)
+const itemMat = new THREE.MeshPhongMaterial({ vertexColors: true, shininess: 20, specular: 0x222222 });
+const itemGeos = {
+  grenade: mergeParts([                                   // Mills bomb: segmented iron body, lever and pin ring
+    { geo: new THREE.SphereGeometry(1, 12, 10).scale(.032, .046, .032), at: [0, 0, 0], color: 0x3c4a2c },
+    ...[-.022, 0, .022].map(y => ({ geo: new THREE.TorusGeometry(.031, .004, 4, 14), at: [0, y, 0], rot: [Math.PI / 2, 0, 0], color: 0x2e3822 })),
+    { geo: new THREE.BoxGeometry(.01, .07, .014), at: [.03, .01, 0], rot: [0, 0, -.15], color: 0x55583f },
+    { geo: new THREE.TorusGeometry(.012, .002, 4, 10), at: [-.02, .045, 0], color: 0xb39a52 },
+  ], .05, true),
+  bandage: mergeParts([                                   // a field dressing: rolled bandage and its paper wrapper
+    { geo: new THREE.CylinderGeometry(.03, .03, .075, 14), at: [0, 0, 0], rot: [0, 0, Math.PI / 2], color: 0xe2dac6 },
+    { geo: new THREE.CylinderGeometry(.031, .031, .03, 14), at: [-.02, 0, 0], rot: [0, 0, Math.PI / 2], color: 0x9c8a62 },
+  ], .05, true),
+  binoculars: mergeParts([                                // two tubes joined by a hinge
+    ...[-.028, .028].map(x => ({ geo: new THREE.CylinderGeometry(.021, .024, .11, 12), at: [x, 0, 0], rot: [Math.PI / 2, 0, 0], color: 0x1d1d1b })),
+    ...[-.028, .028].map(x => ({ geo: new THREE.CylinderGeometry(.018, .018, .012, 12), at: [x, 0, .057], rot: [Math.PI / 2, 0, 0], color: 0x4a5560 })),
+    { geo: new THREE.BoxGeometry(.035, .016, .05), at: [0, 0, -.01], color: 0x2a2a28 },
+  ], .05, true),
+};
+
+// grenades in flight: they bounce, roll to a stop, then explode
+let grenades = [];
+const grenadeGeo = itemGeos.grenade;
+function throwGrenade(p) {
+  const f = forward(p.yaw), mesh = new THREE.Mesh(grenadeGeo, itemMat);
+  const g = { mesh, x: p.x + f.x * .5, y: p.y + 1.7, z: p.z + f.z * .5, vx: f.x * .24 + p.vx * .5, vy: .16, vz: f.z * .24 + p.vz * .5, fuse: GRENADE_FUSE, r: .08 };
+  mesh.scale.setScalar(1.6); mesh.castShadow = true; mesh.position.set(g.x, g.y, g.z);
+  scene.add(mesh); grenades.push(g);
+  p.kick = 1;
+}
+function updateGrenades() {
+  for (const g of grenades) {
+    g.vy -= .012;                                         // gravity
+    const nx = g.x + g.vx, nz = g.z + g.vz;
+    if (blocked(nx, g.z, g.r, g.y)) g.vx *= -.4; else g.x = nx;   // bounce off walls
+    if (blocked(g.x, nz, g.r, g.y)) g.vz *= -.4; else g.z = nz;
+    g.y += g.vy;
+    const floor = supportY(g.x, g.z, g.y + .3) + .05;
+    if (g.y < floor) { g.y = floor; g.vy = Math.abs(g.vy) > .03 ? -g.vy * .3 : 0; g.vx *= .55; g.vz *= .55; }   // bounce, then roll to a stop
+    if (g.vy === 0) { g.vx *= .88; g.vz *= .88; }        // rolling through the grass slows it quickly
+    g.mesh.position.set(g.x, g.y, g.z);
+    g.mesh.rotation.x += Math.hypot(g.vx, g.vz) * 3; g.mesh.rotation.z += g.vx * 2;
+    if (--g.fuse <= 0) explode(g);
+  }
+  grenades = grenades.filter(g => g.fuse > 0);
+}
+function explode(g) {
+  scene.remove(g.mesh);
+  const at = { x: g.x, z: g.z, y: g.y };
+  // anyone close enough, and not behind a wall, gets hurt: less the further away they are
+  for (const v of [...enemies, ...players.filter(p => p.alive)]) {
+    const d = Math.hypot(v.x - g.x, v.z - g.z, ((v.y || 0) + .9) - g.y);
+    if (d > GRENADE_RADIUS || !clearShot(at, v)) continue;
+    const hurt = GRENADE_DAMAGE * (1 - d / GRENADE_RADIUS) * (v.num ? .6 : 1);   // your own grenade hurts you less
+    v.hp -= hurt; v.sinceHit = 0;
+    if (!v.num) { v.uni.emissive.setHex(0x777777); v.flash = 6; }
+  }
+  for (const p of players) p.shake = Math.max(p.shake || 0, clamp01(1 - Math.hypot(p.x - g.x, p.z - g.z) / 35) * 1.3);
+  // a big flash of light that lights up everything around
+  const light = flashLights[nextLight++ % flashLights.length];
+  light.position.set(g.x, g.y + 2, g.z); light.intensity = 14; light.distance = 32;
+  // the fireball: a white-hot core inside rolling orange and red flame
+  for (let i = 0; i < 26; i++) {
+    const a = rand(0, 6.3), r = rand(0, 1.6);
+    addPuff(g.x + Math.cos(a) * r, g.y + rand(.3, 2.6), g.z + Math.sin(a) * r, i < 6 ? 0xfff0b0 : i < 16 ? 0xff7a22 : 0xd23a14, rand(12, 22), .06,
+      { vx: Math.cos(a) * rand(.02, .06), vy: rand(.03, .09), vz: Math.sin(a) * rand(.02, .06), alpha: .95, size: rand(1.8, 3.4), glow: true });
+  }
+  // a shockwave of dust racing out across the ground
+  const ring = new THREE.Mesh(new THREE.RingGeometry(.8, 1.4, 40), new THREE.MeshBasicMaterial({ color: 0xd9ccaa, transparent: true, opacity: .7, depthWrite: false, side: THREE.DoubleSide }));
+  ring.rotation.x = -Math.PI / 2; ring.position.set(g.x, g.y + .15, g.z); scene.add(ring);
+  puffs.push({ mesh: ring, life: 18, max: 18, grow: .22, vx: 0, vy: 0, vz: 0, alpha: .7 });
+  for (let i = 0; i < 24; i++) {                         // dust rolling outwards along the ground
+    const a = i / 24 * 6.3 + rand(-.1, .1), s = rand(.18, .3);
+    addPuff(g.x, g.y + .4, g.z, 0xb3a684, rand(30, 55), .04, { vx: Math.cos(a) * s, vy: rand(0, .02), vz: Math.sin(a) * s, alpha: .55, size: rand(.7, 1.2) });
+  }
+  // a tall column of dark smoke that rises and spreads
+  for (let i = 0; i < 30; i++) addPuff(g.x + rand(-1.2, 1.2), g.y + rand(.5, 3), g.z + rand(-1.2, 1.2), i % 3 ? 0x34302b : 0x57514a, rand(160, 260), .012,
+    { vx: rand(-.03, .03), vy: rand(.03, .08), vz: rand(-.03, .03), alpha: .6, size: rand(1.2, 2.4) });
+  // earth and stones flung high into the air, falling back down
+  for (let i = 0; i < 45; i++) {
+    const a = rand(0, 6.3), s = rand(.08, .3);
+    addPuff(g.x, g.y + .3, g.z, i % 3 ? 0x5a4632 : 0x7a6447, rand(40, 80), -.005, { vx: Math.cos(a) * s, vy: rand(.2, .45), vz: Math.sin(a) * s, alpha: 1, size: rand(.15, .4), gravity: true });
+  }
+  // a wide blackened crater mark left on the ground
+  const scorch = new THREE.Mesh(new THREE.CircleGeometry(3.2, 28), new THREE.MeshBasicMaterial({ color: 0x15110d, transparent: true, opacity: .55, depthWrite: false }));
+  scorch.rotation.x = -Math.PI / 2; scorch.position.set(g.x, g.y - .02, g.z); scene.add(scorch);
+  puffs.push({ mesh: scorch, life: 1800, max: 1800, grow: 0, vx: 0, vy: 0, vz: 0, alpha: .55 });
+}
+
+// which item a soldier is holding: the rifle in both hands, or slung on the back with the item in hand
+function showItem(s) {
+  if (!s.held || s.shownSlot === s.slot) return;
+  s.shownSlot = s.slot;
+  const id = s.inv[s.slot].id;
+  if (id === "rifle") { s.torso.add(s.rifle); s.rifle.position.set(.1, 1.37, .02); s.rifle.rotation.set(0, 0, 0); }
+  else { s.sling.add(s.rifle); s.rifle.position.set(0, 0, -.6); s.rifle.rotation.set(0, 0, 0); }
+  for (const k in s.held) s.held[k].visible = k === id;
+}
+
+// the hotbar on screen: one box per item, with its key, a little picture and how many are left
+const ICONS = {
+  rifle: '<svg viewBox="0 0 48 48"><path d="M3 27h7l3-3h17v-3h13v4h2v3H31l-2 2h-6l-2 4h-5l1-4h-4l-3 4H3z" fill="currentColor"/></svg>',
+  grenade: '<svg viewBox="0 0 48 48"><ellipse cx="22" cy="28" rx="11" ry="14" fill="currentColor"/><path d="M14 22h16M13 28h18M14 34h16M18 15v26M26 15v26" stroke="#141510" stroke-width="1.6"/><path d="M27 13l9 18" stroke="currentColor" stroke-width="3"/><circle cx="17" cy="11" r="4" fill="none" stroke="currentColor" stroke-width="2"/></svg>',
+  bandage: '<svg viewBox="0 0 48 48"><rect x="8" y="14" width="32" height="20" rx="4" fill="currentColor"/><path d="M24 18v12M18 24h12" stroke="#b33" stroke-width="4"/></svg>',
+  binoculars: '<svg viewBox="0 0 48 48"><circle cx="15" cy="29" r="9" fill="currentColor"/><circle cx="33" cy="29" r="9" fill="currentColor"/><rect x="11" y="12" width="8" height="14" fill="currentColor"/><rect x="29" y="12" width="8" height="14" fill="currentColor"/><rect x="19" y="20" width="10" height="5" fill="currentColor"/><circle cx="15" cy="29" r="4" fill="#141510"/><circle cx="33" cy="29" r="4" fill="#141510"/></svg>',
+};
+function buildHotbar(p) {
+  const bar = document.getElementById("hotbar" + p.num);
+  bar.innerHTML = p.inv.map((it, i) =>
+    `<div class="slot"><span class="key">${p.num === 1 ? i + 1 : ""}</span>${ICONS[it.id]}<span class="count"></span><span class="label">${ITEMS[it.id].name}</span></div>`).join("");
+}
+function updateHotbar(p) {
+  const slots = document.getElementById("hotbar" + p.num).children;
+  p.inv.forEach((it, i) => {
+    slots[i].classList.toggle("on", i === p.slot);
+    slots[i].classList.toggle("empty", it.count === 0);
+    slots[i].querySelector(".count").textContent = it.count === undefined ? "" : it.count;
+  });
+  document.getElementById("binoc" + p.num).style.opacity = (p.zoom || 0) > .6 ? 1 : 0;
+}
+
 // ---------- 4) THE SOLDIERS ----------
 // Three armies of 1944, each with its own uniform, helmet, kit and rifle.
 const KITS = {
@@ -1046,12 +1180,22 @@ function buildSoldier(kind) {
   });
   mesh(geos.torso, torso);
   rifleGeos[kind] = rifleGeos[kind] || rifleGeometry(kind);
-  mesh(rifleGeos[kind], torso, rifleMat).position.set(.1, 1.37, .02);                  // rifle, butt in the shoulder
+  const rifle = mesh(rifleGeos[kind], torso, rifleMat);
+  rifle.position.set(.1, 1.37, .02);                                     // rifle, butt in the shoulder
+  const slingTilt = new THREE.Group(); slingTilt.position.set(0, 1.28, -.36); slingTilt.rotation.z = .55; torso.add(slingTilt);
+  const sling = new THREE.Group(); sling.rotation.x = -Math.PI / 2; slingTilt.add(sling);   // across the back when not in use
+  let held;
+  if (kind !== "german") {                            // items the players can hold in the right hand
+    held = {};
+    for (const [id, at] of [["grenade", [.13, 1.37, .34]], ["bandage", [.11, 1.35, .38]], ["binoculars", [.1, 1.43, .5]]]) {
+      held[id] = mesh(itemGeos[id], torso, itemMat); held[id].position.set(...at); held[id].visible = false;
+    }
+  }
   const muzzle = new THREE.Object3D(); muzzle.position.set(.1, 1.376, 1.24); torso.add(muzzle);  // end of the barrel
   const ejectPort = new THREE.Object3D(); ejectPort.position.set(.13, 1.4, .47); torso.add(ejectPort);   // where empty cases fly out
   g.scale.setScalar(1.1);                                                // a bit bigger than standard
   scene.add(g);
-  return { group: g, body, upper, hips, knees, muzzle, ejectPort, uni: mat };
+  return { group: g, body, upper, hips, knees, muzzle, ejectPort, uni: mat, torso, rifle, sling, held };
 }
 
 // health bar floating above a soldier's head: green, then yellow, then red as health drops
@@ -1077,7 +1221,7 @@ function makePlayer(num) {
   const s = buildSoldier(num === 1 ? "british" : "american");
   return {
     num, x: num === 1 ? -10 : 10, z: 0, y: groundY(num === 1 ? -10 : 10, 0), yaw: 0, r: .5, hp: MAX_HP, ammo: MAG_SIZE, reload: 0, cool: 0,
-    alive: true, pitch: 0, vx: 0, vz: 0, jumpY: 0, vy: 0, land: 0, sinceHit: 0, healing: false, crouched: false, crouchAmt: 0, walk: 0, gait: 0, kick: 0, ...s, bar: makeHealthBar(s.group),
+    alive: true, inv: newInventory(), slot: 0, bandaging: 0, zoom: 0, shake: 0, vx: 0, vz: 0, jumpY: 0, vy: 0, land: 0, sinceHit: 0, healing: false, crouched: false, crouchAmt: 0, walk: 0, gait: 0, kick: 0, ...s, bar: makeHealthBar(s.group),
     cam: new THREE.PerspectiveCamera(65, 1, .1, 200),
   };
 }
@@ -1112,6 +1256,8 @@ function clearWorld() {
   for (const p of puffs) scene.remove(p.mesh);
   for (const c of casings) scene.remove(c.mesh);
   casings = [];
+  for (const g of grenades) scene.remove(g.mesh);
+  grenades = [];
   players = []; enemies = []; fallen = []; bullets = []; puffs = [];
 }
 function startGame(n) {
@@ -1130,6 +1276,7 @@ function startGame(n) {
   document.getElementById("pane1").classList.toggle("split", twoPlayer);
   document.getElementById("pane2").classList.toggle("split", twoPlayer);
   layoutPanes();
+  for (const p of players) buildHotbar(p);
 }
 function nextWave() {
   wave++;
@@ -1139,16 +1286,17 @@ function nextWave() {
   for (const p of players) {            // fallen soldiers come back, everyone patches up
     if (!p.alive) { p.alive = true; p.hp = MAX_HP / 2; p.group.rotation.x = 0; p.group.position.y = 0; p.vx = p.vz = 0; p.jumpY = p.vy = 0; p.y = supportY(p.x, p.z, 99); p.sinceHit = 0; p.crouched = false; }
     else p.hp = Math.min(MAX_HP, p.hp + MAX_HP / 4);
+    if (wave > 1) for (const it of p.inv) if (ITEMS[it.id].perWave) it.count = Math.min(ITEMS[it.id].max, it.count + ITEMS[it.id].perWave);   // resupply
   }
 }
 // puffs: smoke, dust and sparks. Optional extras: drift speed (vx, vy, vz), starting see-through-ness (alpha), glow
-function addPuff(x, y, z, color, life, grow, { vx = 0, vy = 0, vz = 0, alpha = .8, size = 1, glow = false } = {}) {
+function addPuff(x, y, z, color, life, grow, { vx = 0, vy = 0, vz = 0, alpha = .8, size = 1, glow = false, gravity = false } = {}) {
   const mesh = new THREE.Mesh(puffGeo, new THREE.MeshBasicMaterial({
     color, transparent: true, opacity: alpha, depthWrite: false,
     blending: glow ? THREE.AdditiveBlending : THREE.NormalBlending,
   }));
   mesh.position.set(x, y, z); mesh.scale.setScalar(size); scene.add(mesh);
-  puffs.push({ mesh, life, max: life, grow, vx, vy, vz, alpha });
+  puffs.push({ mesh, life, max: life, grow, vx, vy, vz, alpha, gravity });
 }
 
 // ---- muzzle flash: a fiery red-orange burst with a yellow-orange heart, gone in a blink ----
@@ -1189,7 +1337,7 @@ function muzzleFlash(pos, yaw) {
 
   const light = flashLights[nextLight++ % flashLights.length];
   const f = forward(yaw);
-  light.position.set(pos.x + f.x * .6, pos.y, pos.z + f.z * .6); light.intensity = 2.2;   // just ahead, so it lights the ground more than the shooter
+  light.position.set(pos.x + f.x * .6, pos.y, pos.z + f.z * .6); light.intensity = 2.2; light.distance = 9;   // just ahead, so it lights the ground more than the shooter
 
   for (let i = 0; i < 3; i++) {                          // thin dark gun smoke rolls forward then drifts up
     const push = rand(.02, .05);
@@ -1231,7 +1379,7 @@ function shoot(from, yaw, team, spread, target) {
     }
   }
   const h0 = (from.y || 0) + 1.5, reach = target ? Math.max(1, dist(from, target)) : 30;
-  const h1 = target ? (target.y || 0) + 1.25 : h0 + ((from.y || 0) + 1.3 - (from.pitch || 0) * 9 - h0) / 10 * reach;
+  const h1 = target ? (target.y || 0) + 1.25 : h0;
   const lift = Math.max(from.y || 0, team === "enemy" && target ? target.y || 0 : 0);
   const mesh = new THREE.Mesh(bulletGeo, team === "ally" ? allyTracer : enemyTracer);
   mesh.rotation.order = "YXZ"; mesh.rotation.set(-Math.atan2(h1 - h0, reach), a, 0); scene.add(mesh);
@@ -1242,7 +1390,6 @@ function shoot(from, yaw, team, spread, target) {
   muzzleFlash(from.muzzle.getWorldPosition(muzzlePos), a);
 }
 
-const lookUpDown = (p, amount) => { p.pitch = Math.max(-.45, Math.min(.55, p.pitch + amount)); };   // + looks down, - looks up
 function updatePlayer(p) {
   if (!p.alive) return;
   let fwd = 0, side = 0, turn = 0;
@@ -1264,7 +1411,6 @@ function updatePlayer(p) {
     turn = (keys.ArrowLeft ? 1 : 0) - (keys.ArrowRight ? 1 : 0);
   }
   p.yaw += turn * TURN_SPEED;
-  if (!twoPlayer) lookUpDown(p, ((keys.ArrowDown ? 1 : 0) - (keys.ArrowUp ? 1 : 0)) * TURN_SPEED * .6);   // arrow keys look up and down too
   let tx = 0, tz = 0;                                    // the speed we want to reach
   if (fwd || side) {
     const f = forward(p.yaw), r = rightOf(p.yaw), len = Math.hypot(fwd, side);
@@ -1287,13 +1433,33 @@ function updatePlayer(p) {
   if (p.healing) p.hp = Math.min(MAX_HP, p.hp + REGEN_RATE);
 
   if (p.cool > 0) p.cool--;
-  if (p.reload > 0) { if (--p.reload === 0) p.ammo = MAG_SIZE; return; }
-  const reloadKey = p.num === 1 ? keys.KeyR : keys.ShiftRight;
-  if (reloadKey && p.ammo < MAG_SIZE) { p.reload = RELOAD_TIME; return; }
+  if (p.reload > 0 && --p.reload === 0) p.ammo = MAG_SIZE;
+  if (p.bandaging > 0) { p.bandaging--; p.hp = Math.min(MAX_HP, p.hp + BANDAGE_HEAL / BANDAGE_TIME); }   // bandage going on
+
+  // choosing an item: number keys or the mouse wheel for soldier 1, the ' key for soldier 2
+  if (p.num === 1) {
+    p.inv.forEach((it, i) => { if (keys["Digit" + (i + 1)]) p.slot = i; });
+    if (wheelSteps) { p.slot = (p.slot + wheelSteps + p.inv.length * 9) % p.inv.length; wheelSteps = 0; }
+  } else {
+    if (keys.Quote && !p.swapHeld) p.slot = (p.slot + 1) % p.inv.length;
+    p.swapHeld = keys.Quote;
+  }
+  const item = p.inv[p.slot];
   const firing = p.num === 1 ? (keys.Space || (!twoPlayer && mouse.down)) : keys.Enter;
-  if (firing && p.cool === 0) {
-    if (p.ammo > 0) { shoot(p, p.yaw, "ally", .02); p.ammo--; p.cool = 12; }
-    else p.reload = RELOAD_TIME;
+  const pressed = firing && !p.fireHeld;                 // grenades and bandages: one per press
+  p.fireHeld = firing;
+  p.zoomWant = item.id === "binoculars" && firing;      // binoculars: hold to look through them
+  if (item.id === "rifle") {
+    const reloadKey = p.num === 1 ? keys.KeyR : keys.ShiftRight;
+    if (reloadKey && p.ammo < MAG_SIZE && !p.reload) p.reload = RELOAD_TIME;
+    if (firing && p.cool === 0 && !p.reload) {
+      if (p.ammo > 0) { shoot(p, p.yaw, "ally", .02); p.ammo--; p.cool = 12; }
+      else p.reload = RELOAD_TIME;
+    }
+  } else if (item.id === "grenade") {
+    if (pressed && item.count > 0 && p.cool === 0) { throwGrenade(p); item.count--; p.cool = 40; }
+  } else if (item.id === "bandage") {
+    if (pressed && item.count > 0 && !p.bandaging && p.hp < MAX_HP) { p.bandaging = BANDAGE_TIME; item.count--; }
   }
 }
 
@@ -1373,12 +1539,14 @@ function update() {
     else {
       p.mesh.position.x += p.vx; p.mesh.position.y += p.vy; p.mesh.position.z += p.vz;
       p.vx *= .94; p.vz *= .94;                          // smoke slows down in the air
+      if (p.gravity) { p.vy -= .012; if (p.mesh.position.y < groundY(p.mesh.position.x, p.mesh.position.z)) p.life = 0; }   // dirt falls back down
       p.mesh.scale.multiplyScalar(1 + p.grow); p.mesh.material.opacity = p.alpha * p.life / p.max;
     }
     if (p.life <= 0) scene.remove(p.mesh);
   }
   puffs = puffs.filter(p => p.life > 0);
   updateCasings();
+  updateGrenades();
   for (const l of flashLights) l.intensity *= .45;       // flash light fades in a few frames
 
   if (!players.some(p => p.alive)) {
@@ -1451,20 +1619,31 @@ function animateSoldier(s, down) {   // runs once per game step, so it looks the
   s.upper.rotation.y = Math.sin(s.walk) * .07 * g;
   s.upper.position.z = -s.kick * .05;
 }
-const camRay = new THREE.Raycaster(), camHead = new THREE.Vector3(), camWant = new THREE.Vector3();
+const camRay = new THREE.Raycaster(), camHead = new THREE.Vector3(), camWant = new THREE.Vector3(), camLook = new THREE.Vector3();
 function placeCamera(p) {
   const f = forward(p.yaw), r = rightOf(p.yaw);
   const floorY = (p.y ?? groundY(p.x, p.z)) - (p.jumpY || 0);
   const want = floorY + (p.jumpY || 0) * .15 - (p.crouchAmt || 0) * .55;   // follow the floor; barely rise with a jump; drop with a crouch
   p.camY = p.camY === undefined ? want : p.camY + (want - p.camY) * .15;
   camHead.set(p.x, p.camY + 1.6, p.z);
-  const pitch = p.pitch || 0;                        // looking down lifts the camera, looking up lowers it
-  camWant.set(p.x - f.x * 5.2 + r.x * 1.0, 3.0 + p.camY + pitch * 2.6, p.z - f.z * 5.2 + r.z * 1.0);
+  camWant.set(p.x - f.x * 5.2 + r.x * 1.0, 3.0 + p.camY, p.z - f.z * 5.2 + r.z * 1.0);
   const gap = camWant.distanceTo(camHead);
   camRay.set(camHead, camWant.clone().sub(camHead).normalize()); camRay.far = gap;
   const hit = camRay.intersectObject(houseMesh)[0];   // a wall or the ceiling in the way: come in closer
   p.cam.position.copy(hit ? camHead.clone().addScaledVector(camRay.ray.direction, Math.max(.3, hit.distance - .3)) : camWant);
-  p.cam.lookAt(p.x + f.x * 10, 1.3 + p.camY - pitch * 9, p.z + f.z * 10);
+  p.camClose = p.cam.position.distanceTo(camHead) < 1.6;   // squeezed right up behind the soldier
+  camLook.set(p.x + f.x * 10, 1.3 + p.camY, p.z + f.z * 10);
+  // binoculars: move to the soldier's eyes and zoom right in
+  p.zoom += ((p.zoomWant && p.alive ? 1 : 0) - p.zoom) * .2;
+  if (p.zoom > .01) {
+    p.cam.position.lerp(camWant.set(p.x + f.x * .35, p.camY + 1.95, p.z + f.z * .35), p.zoom);
+    camLook.lerp(camWant.set(p.x + f.x * 40, p.camY + 1.8, p.z + f.z * 40), p.zoom);
+    if (p.zoom > .3) p.camClose = true;
+  }
+  p.cam.fov = 65 - 45 * p.zoom;
+  // a nearby explosion shakes the view
+  if (p.shake > .01) { p.cam.position.x += rand(-1, 1) * p.shake * .3; p.cam.position.y += rand(-1, 1) * p.shake * .3; p.shake *= .9; }
+  p.cam.lookAt(camLook);
 }
 const menuCam = new THREE.PerspectiveCamera(55, 1, .1, 300);
 let menuAngle = 0;
@@ -1472,7 +1651,7 @@ let menuAngle = 0;
 function render() {
   windTime.value = performance.now() / 1000;
   const w = stage.clientWidth, h = stage.clientHeight;
-  for (const p of players) { poseSoldier(p, !p.alive); updateHealthBar(p); }
+  for (const p of players) { poseSoldier(p, !p.alive); updateHealthBar(p); showItem(p); }
   for (const e of enemies) poseSoldier(e, false);
 
   renderer.setScissorTest(true);
@@ -1491,7 +1670,9 @@ function render() {
     const vw = w / n;
     p.cam.aspect = vw / h; p.cam.updateProjectionMatrix();
     renderer.setViewport(i * vw, 0, vw, h); renderer.setScissor(i * vw, 0, vw, h);
+    p.group.visible = !p.camClose;                    // never look out from inside your own body
     renderer.render(scene, p.cam);
+    p.group.visible = true;
   });
 }
 
@@ -1504,6 +1685,7 @@ function updateHUD() {
     bar.style.backgroundColor = hpColor(p.hp / MAX_HP);
     bar.parentElement.classList.toggle("healing", p.healing);   // the bar glows while health is coming back
     document.getElementById("hptext" + p.num).textContent = `${Math.ceil(p.hp)} / ${MAX_HP}`;
+    updateHotbar(p);
     document.getElementById("ammo" + p.num).textContent = p.reload ? "RELOADING..." : "AMMO " + "▮".repeat(p.ammo) + "▯".repeat(MAG_SIZE - p.ammo);
   });
   document.getElementById("topline").textContent = `WAVE ${wave} · SCORE ${score} · ENEMIES ${enemies.length + spawnQueue}`;
@@ -1534,7 +1716,13 @@ function loop(now) {
 requestAnimationFrame(loop);
 
 // ---------- 7) CONTROLS ----------
-const gameKeys = ["Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Enter", "Slash"];
+const gameKeys = ["Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Enter", "Slash", "Quote"];
+let wheelSteps = 0;                // mouse wheel turns since the last game step (changes soldier 1's item)
+window.addEventListener("wheel", e => {
+  if (state !== "play") return;
+  e.preventDefault();
+  wheelSteps += Math.sign(e.deltaY);
+}, { passive: false });
 window.addEventListener("keydown", e => {
   if (state === "play" && gameKeys.includes(e.code)) e.preventDefault();
   if (e.code === "KeyP" && state === "play") paused = !paused;
@@ -1552,10 +1740,7 @@ stage.addEventListener("mousedown", e => {
 });
 window.addEventListener("mouseup", () => { mouse.down = false; });
 document.addEventListener("mousemove", e => {
-  if (document.pointerLockElement === canvas && players[0] && !paused) {
-    players[0].yaw -= e.movementX * MOUSE_SENSITIVITY;
-    lookUpDown(players[0], e.movementY * MOUSE_SENSITIVITY * (INVERT_LOOK ? -1 : 1));
-  }
+  if (document.pointerLockElement === canvas && players[0] && !paused) players[0].yaw -= e.movementX * MOUSE_SENSITIVITY;
 });
 
 document.getElementById("btn1").onclick = () => startGame(1);

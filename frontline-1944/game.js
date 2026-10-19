@@ -7,7 +7,7 @@
 //            5 game rules · 6 drawing · 7 controls
 // ============================================================
 
-const BUILD = 45;             // shown on screen, so you can tell the browser loaded the newest version
+const BUILD = 47;             // shown on screen, so you can tell the browser loaded the newest version
 document.querySelector(".tag").textContent += " · build " + BUILD;
 
 // ---------- 1) SETTINGS: change these to tweak the game ----------
@@ -47,7 +47,11 @@ const TANK_RELOAD = 300;      // frames between main gun shots
 const SHELL_POWER = 1.3;      // a tank shell's blast compared with a grenade
 const TANK_ARMOUR_BLAST = 1.8;   // how much blasts hurt tanks
 const KRADS_ALLY = 4;         // Kettenkrads parked near your start (topped up each wave)
-const KRADS_ENEMY = 3;        // German Kettenkrads that arrive each wave, two soldiers on each
+const KRADS_ENEMY = 0;        // German Kettenkrads that arrive each wave, two soldiers on each (0: the Germans stay in their trenches)
+const GERMAN_LINE_X = 96;     // where the German trench line runs across the field
+const POST_GAP = 2.4;         // space between German riflemen along their trench
+const MIDLINE_X = 43;         // the white line across the middle of the field
+const BRITISH_FLAG = [-31, 0]; // where your flag flies (behind your trench)
 const KRAD_SPEED = .28;       // top speed (map units per frame: .28 is about 60 km/h)
 const KRAD_HP = 150;
 const FUNDS_PER_WAVE = 50;    // money earned for every wave you win (spend it in the market: Z)
@@ -172,6 +176,10 @@ const TRENCH = { depth: 1, half: .85, parapet: .45, ramp: 3 };   // depth, half 
 const trenchLines = [
   { pts: [[-23, -13], [-20, -9], [-23.5, -5], [-20, -1], [-23.5, 3], [-20, 7], [-23, 11.5]], rampStart: true, rampEnd: true },   // the fire trench
   { pts: [[-20.2, -1], [-16.5, -.5], [-13.5, -1.8]], rampStart: false, rampEnd: true },                                        // a side trench towards the start
+  // the German line: a long zig-zag fire trench across the far side of the field
+  { pts: Array.from({ length: 16 }, (_, i) => [GERMAN_LINE_X + (i % 2 ? 7 : 0), -90 + i * 12]), rampStart: true, rampEnd: true, german: true, fire: true },
+  { pts: [[GERMAN_LINE_X + 7, -30], [GERMAN_LINE_X + 19, -27], [GERMAN_LINE_X + 31, -31]], rampStart: false, rampEnd: true, german: true },   // communication trenches to the rear
+  { pts: [[GERMAN_LINE_X + 7, 42], [GERMAN_LINE_X + 19, 45], [GERMAN_LINE_X + 31, 41]], rampStart: false, rampEnd: true, german: true },
 ];
 for (const t of trenchLines) {
   t.len = 0;
@@ -180,6 +188,14 @@ for (const t of trenchLines) {
     t.len += L;
     return s;
   });
+}
+const trenchPosts = [];
+for (const t of trenchLines) if (t.fire) {
+  for (const sg of t.segs) for (let u = 1; u < sg.L - .5; u += POST_GAP) {
+    const along = sg.s0 + u;
+    if (along < TRENCH.ramp + 1 || along > t.len - TRENCH.ramp - 1) continue;
+    trenchPosts.push({ x: sg.a[0] + (sg.b[0] - sg.a[0]) * u / sg.L, z: sg.a[1] + (sg.b[1] - sg.a[1]) * u / sg.L, holder: null });
+  }
 }
 function lineInfo(t, x, z) {         // how far a spot is from one trench's middle line, and how deep that trench is there
   let best = { d: 1e9, depth: 0 };
@@ -196,6 +212,11 @@ function lineInfo(t, x, z) {         // how far a spot is from one trench's midd
     }
   }
   return best;
+}
+for (let i = walls.length - 1; i >= 0; i--) {   // no walls across the German trenches
+  const w = walls[i];
+  if ((w.type === "bags" || w.type === "ruin") && [[0, 0], [1, 0], [0, 1], [1, 1], [.5, .5]].some(([a, b]) =>
+    trenchLines.some(t => t.german && lineInfo(t, w.x + w.w * a, w.z + w.d * b).d < TRENCH.half + 4))) walls.splice(i, 1);
 }
 function trenchAt(x, z) {            // the nearest trench to a spot
   let best = { d: 1e9, depth: 0 };
@@ -384,7 +405,9 @@ function hillExact(x, z) {
     const u = (dx * c + dz * sn) / h.rx, v = (-dx * sn + dz * c) / h.rz, d = u * u + v * v;
     if (d < 9) y += h.h * Math.exp(-d);
   }
-  return y * flat;
+  let nearLine = 1e9;
+  for (const t of trenchLines) if (t.german) nearLine = Math.min(nearLine, lineInfo(t, x, z).d);
+  return y * flat * clamp01((nearLine - 8) / 25);
 }
 let hillGrid = null;
 function hillHeight(x, z) {          // looked up from the grid (much faster than adding up every hill each time)
@@ -878,6 +901,75 @@ function leafCluster(L, center, radius, crownCenter, count, tint, cardSize = 1.1
     });
   }
   mergedMesh(P);
+})();
+
+// ---------- the white line across the middle of the battlefield, and a flag for each side ----------
+(function makeLineAndFlags() {
+  // a painted chalk line from one edge of the field to the other, following the ground
+  const pos = [], w = .14;
+  for (let z = MINZ; z < MAXZ; z += .5) {
+    const y0 = groundY(MIDLINE_X, z, true) + .035, y1 = groundY(MIDLINE_X, z + .5, true) + .035;
+    pos.push(MIDLINE_X - w, y0, z, MIDLINE_X + w, y0, z, MIDLINE_X + w, y1, z + .5, MIDLINE_X - w, y0, z, MIDLINE_X + w, y1, z + .5, MIDLINE_X - w, y1, z + .5);
+  }
+  const lineGeo = new THREE.BufferGeometry();
+  lineGeo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  lineGeo.computeVertexNormals();
+  const line = new THREE.Mesh(lineGeo, new THREE.MeshLambertMaterial({ color: 0xf1efe6, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -2 }));
+  line.receiveShadow = true;
+  scene.add(line);
+
+  // the flags, painted on hidden canvases
+  const unionJack = paintTexture(300, 150, (g, W, H) => {
+    g.fillStyle = "#012169"; g.fillRect(0, 0, W, H);
+    const diag = (width, color) => {
+      g.strokeStyle = color; g.lineWidth = width; g.beginPath();
+      g.moveTo(0, 0); g.lineTo(W, H); g.moveTo(W, 0); g.lineTo(0, H); g.stroke();
+    };
+    diag(30, "#ffffff");                                 // St Andrew's white saltire
+    g.save(); g.beginPath(); g.rect(0, 0, W, H); g.clip();
+    g.strokeStyle = "#c8102e"; g.lineWidth = 10;          // St Patrick's red saltire, set off-centre the way the real flag is
+    for (const [x0, y0, x1, y1, dx, dy] of [[0, 0, W / 2, H / 2, 0, 5], [W / 2, H / 2, W, H, 0, -5], [W, 0, W / 2, H / 2, 0, 5], [W / 2, H / 2, 0, H, 0, -5]]) {
+      g.beginPath(); g.moveTo(x0 + dx, y0 + dy); g.lineTo(x1 + dx, y1 + dy); g.stroke();
+    }
+    g.restore();
+    g.fillStyle = "#ffffff"; g.fillRect(W / 2 - 25, 0, 50, H); g.fillRect(0, H / 2 - 25, W, 50);   // St George's cross, with its white border
+    g.fillStyle = "#c8102e"; g.fillRect(W / 2 - 15, 0, 30, H); g.fillRect(0, H / 2 - 15, W, 30);
+  });
+  const germanFlag = paintTexture(300, 180, (g, W, H) => {   // a field-grey flag carrying the German army's cross (the Balkenkreuz)
+    g.fillStyle = "#5c6153"; g.fillRect(0, 0, W, H);
+    g.fillStyle = "#4b5043"; g.fillRect(0, 0, W, 10); g.fillRect(0, H - 10, W, 10);   // darker border
+    const cx = W / 2, cy = H / 2;
+    g.fillStyle = "#f2f0ea"; g.fillRect(cx - 62, cy - 16, 124, 32); g.fillRect(cx - 16, cy - 62, 32, 124);   // white outline
+    g.fillStyle = "#111111"; g.fillRect(cx - 54, cy - 9, 108, 18); g.fillRect(cx - 9, cy - 54, 18, 108);     // black cross
+  });
+  const flag = (x, z, tex, aspect) => {
+    const gy = groundY(x, z, true), poleH = 8;
+    const pole = new THREE.Mesh(new THREE.CylinderGeometry(.05, .08, poleH, 10), new THREE.MeshStandardMaterial({ color: 0xc9c4b4, roughness: .5, metalness: .4 }));
+    pole.position.set(x, gy + poleH / 2, z); pole.castShadow = true; scene.add(pole);
+    const knob = new THREE.Mesh(new THREE.SphereGeometry(.1, 12, 10), new THREE.MeshStandardMaterial({ color: 0xc8a43c, roughness: .3, metalness: .8 }));
+    knob.position.set(x, gy + poleH + .05, z); scene.add(knob);
+    for (let i = 0; i < 6; i++) {                        // sandbags round the foot of the pole
+      const a = i / 6 * Math.PI * 2, bag = new THREE.Mesh(new THREE.BoxGeometry(.5, .22, .3), new THREE.MeshLambertMaterial({ color: i % 2 ? 0xb9a676 : 0xa8956a }));
+      bag.position.set(x + Math.cos(a) * .35, gy + .1, z + Math.sin(a) * .35); bag.rotation.y = -a; bag.castShadow = true; scene.add(bag);
+    }
+    const fw = 3, fh = fw / aspect;
+    const geo = new THREE.PlaneGeometry(fw, fh, 24, 12).translate(fw / 2, 0, 0);   // the edge at x = 0 is tied to the pole
+    const mat = new THREE.MeshStandardMaterial({ map: tex, side: THREE.DoubleSide, roughness: .9 });
+    mat.onBeforeCompile = shader => {                    // the flag ripples in the wind, more towards its loose end
+      shader.uniforms.windTime = windTime;
+      shader.vertexShader = "uniform float windTime;\n" + shader.vertexShader.replace("#include <begin_vertex>", `#include <begin_vertex>
+        float loose = position.x / ${fw.toFixed(1)};
+        transformed.z += sin(windTime * 3.2 - position.x * 2.1 + position.y * .6) * .22 * loose;
+        transformed.y -= loose * loose * .25;`);
+      shader.fragmentShader = shader.fragmentShader.replace("#include <normal_fragment_begin>", "#include <normal_fragment_begin>\n  normal = normalize( vNormal );");
+    };
+    const cloth = new THREE.Mesh(geo, mat);
+    cloth.position.set(x, gy + poleH - fh / 2 - .15, z); cloth.rotation.y = Math.PI / 2 + .35; cloth.castShadow = true;
+    scene.add(cloth);
+    walls.push({ x: x - .45, z: z - .45, w: .9, d: .9, type: "pole", top: gy + poleH });   // solid: walk and drive round it
+  };
+  flag(BRITISH_FLAG[0], BRITISH_FLAG[1], unionJack, 2);
+  flag(GERMAN_LINE_X + 18, 6, germanFlag, 300 / 180);
 })();
 
 let houseMesh;
@@ -1481,6 +1573,11 @@ function play(name, x, z, extra = {}) {
       tone(o, { len: .25, freq: 1900 + Math.random() * 600, type: "triangle", vol: .18 });
       noiseHit(o, { len: .05, type: "highpass", freq: 3000, vol: .3 });
       break;
+    case "radio":                    // a burst of radio static: pssshk
+      noiseHit(o, { len: .45, type: "bandpass", freq: 2200, q: .7, vol: .55, attack: .01 });
+      for (let i = 0; i < 6; i++) noiseHit(o, { start: Math.random() * .4, len: .03, type: "highpass", freq: 3500, vol: .5 });
+      tone(o, { start: .02, len: .08, freq: 1200, type: "square", vol: .05 });
+      break;
     case "hiss":                     // a smoke grenade pouring out smoke
       noiseHit(o, { len: 2.2, type: "highpass", freq: 3200, vol: .18, attack: .15 });
       noiseHit(o, { len: 2.2, type: "bandpass", freq: 1200, q: .6, vol: .08, attack: .2 });
@@ -1671,6 +1768,7 @@ function updateTank(t) {
   const want = Math.atan2(gx - t.x, gz - t.z), dg = Math.hypot(gx - t.x, gz - t.z);
   let diff = Math.atan2(Math.sin(want - t.yaw), Math.cos(want - t.yaw));
   let go = dg > keep + 4 ? TANK_SPEED : dg < keep - 8 ? -TANK_SPEED * .6 : 0;
+  if (t.side === "enemy") go = 0;                         // German tanks hold their positions
   if (t.reverse > 0) { t.reverse--; go = -TANK_SPEED * .7; diff = t.turnAway; }
   if (Math.abs(diff) > .5 && go > 0) go *= .3;                // slow down to turn
   t.speed += (go - t.speed) * .05;
@@ -1786,7 +1884,7 @@ function tankWave() {
   const theirs = Math.min(ENEMY_TANKS + Math.floor((wave - 1) / 2), 6);   // German tanks still fighting count towards this
   for (let i = tanks.filter(t => t.side === "enemy" && !t.dead).length; i < theirs; i++) {
     for (let tries = 0; tries < 60; tries++) {
-      const lead = players[0], x = Math.min(MAXX - 6, lead.x + ARRIVE_DISTANCE + rand(-5, 10)), z = Math.max(MINZ + 6, Math.min(MAXZ - 6, lead.z + rand(-40, 40))), t = { x, z, half: [1.5, 2.95] };
+      const x = GERMAN_LINE_X + rand(16, 26), z = rand(-70, 70), t = { x, z, half: [1.5, 2.95] };   // dug in behind the German trenches
       if (tankFits(t, x, z, -Math.PI / 2)) { tanks.push(makeTank("enemy", x, z, -Math.PI / 2)); break; }
     }
   }
@@ -2675,6 +2773,10 @@ function nextWave() {
   wave++;
   setTimeout(() => play("whistle"), 300);
   spawnQueue = 3 + wave * 2 + EXTRA_ENEMIES;
+  for (const p of trenchPosts) p.holder = null;
+  if (players.length) while (spawnQueue > 0 && spawnDefender()) spawnQueue--;     // the trench line is manned when the wave begins
+  radioTimer = 60 * 50;
+  setTimeout(() => radio(wave > 1 ? pick(RADIO.won) + " " + pick(RADIO.start) : pick(RADIO.start)), 1500);
   while (players.length && allies.length < ALLIES) allies.push(makeAlly());   // reinforcements replace the fallen
   if (players.length) { tankWave(); kradWave(); }
   spawnTimer = 0;
@@ -2912,6 +3014,70 @@ function updateAlly(a) {
     a.cool = rand(60, 110);
   }
 }
+function spawnDefender() {
+  const foes = [...players.filter(p => p.alive), ...allies];
+  const free = trenchPosts.filter(p => (!p.holder || p.holder.hp <= 0) && !foes.some(f => Math.hypot(f.x - p.x, f.z - p.z) < 20));
+  if (!free.length) return false;
+  const post = pick(free), e = makeEnemy();
+  e.x = post.x; e.z = post.z; e.y = groundY(post.x, post.z); e.yaw = -Math.PI / 2; e.post = post; post.holder = e;
+  e.crouched = true; e.duck = rand(30, 150); e.cool = rand(60, 160);
+  e.group.position.set(e.x, e.y, e.z);
+  enemies.push(e);
+  return true;
+}
+// a German holding his post: ducks down behind the sandbags, pops up to fire, and never leaves the trench
+function holdPost(e, t, d, diff, sees) {
+  const dx = e.post.x - e.x, dz = e.post.z - e.z, dp = Math.hypot(dx, dz);
+  if (dp > .4) steer(e, dx / dp * ENEMY_SPEED, dz / dp * ENEMY_SPEED, AGILITY * .6); else steer(e, 0, 0, AGILITY * .6);
+  if (--e.duck <= 0) { e.crouched = !e.crouched; e.duck = e.crouched ? rand(50, 140) : rand(70, 150); }
+  stepHeight(e, false);
+  if (--e.cool <= 0 && !e.crouched && d < 55 && sees && Math.abs(diff) < .3 && !smokeBlocks(e, t)) {
+    const moving = Math.min(1, Math.hypot(t.vx, t.vz) / PLAYER_SPEED);
+    shoot(e, e.yaw, "enemy", .03 + d * .004 + moving * .05 + (t.crouched ? .03 : 0), t);
+    e.cool = rand(70, 130) - Math.min(wave * 4, 40);
+  }
+}
+const RADIO = {
+  start: [
+    "Command to all units! Jerry is dug in along the east trenches. Get in there and clear them out!",
+    "This is command. Those trenches will not take themselves. Advance and raid that trench line, now!",
+    "Listen up! I want grenades in those trenches and boots in after them. Move!",
+    "All units, the enemy line is to the east. Push forward and take those trenches!",
+  ],
+  push: [
+    "What are you waiting for? Get moving! Raid those trenches!",
+    "Command here. You are sitting still, soldier! Move up, move up!",
+    "I did not send you out there for a picnic! Take that trench line!",
+    "Keep pushing! Use the smoke and get into those trenches!",
+    "Get your heads down and get across that field! Now!",
+  ],
+  won: ["Trench line taken! Good work.", "That's the way! The trench is ours.", "Well done, they're on the run!"],
+};
+let radioTimer = 0, radioVoice = null;
+function pickRadioVoice() {          // a man's English voice if the browser has one
+  const vs = window.speechSynthesis ? speechSynthesis.getVoices() : [];
+  return vs.find(v => /UK English Male|George|Ryan|Daniel|Thomas|Arthur/i.test(v.name) && /^en/i.test(v.lang))
+    || vs.find(v => /en-GB/i.test(v.lang)) || vs.find(v => /^en/i.test(v.lang)) || null;
+}
+if (window.speechSynthesis) speechSynthesis.onvoiceschanged = () => { radioVoice = pickRadioVoice(); };
+function radio(text) {               // static, the commander shouting, static again; his words appear on screen
+  if (state !== "play") return;
+  const box = document.getElementById("radio");
+  document.getElementById("radioText").textContent = text;
+  box.hidden = false;
+  clearTimeout(radio.hide); radio.hide = setTimeout(() => { box.hidden = true; }, 2500 + text.length * 70);
+  play("radio");
+  if (sound.muted || !window.speechSynthesis) return;
+  setTimeout(() => {
+    try {
+      speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(text);
+      u.voice = radioVoice || pickRadioVoice(); u.pitch = .55; u.rate = 1.12; u.volume = 1;
+      u.onend = () => play("radio");
+      speechSynthesis.speak(u);
+    } catch (err) { /* no voice: the words are still on screen */ }
+  }, 380);
+}
 function updateEnemy(e) {
   if (e.flash > 0 && --e.flash === 0) e.uni.emissive.setHex(0);
   const targets = [...players.filter(p => p.alive), ...allies];
@@ -2922,6 +3088,7 @@ function updateEnemy(e) {
   const diff = Math.atan2(Math.sin(want - e.yaw), Math.cos(want - e.yaw));   // shortest way round
   e.yaw += Math.max(-ENEMY_TURN, Math.min(ENEMY_TURN, diff));
   const sees = canSee(e, t);
+  if (e.post) { holdPost(e, t, d, diff, sees); return; }
   if (e.pause > 0) { e.pause--; steer(e, 0, 0, AGILITY * .6); }            // brief stop to take aim
   else if (d > 15 || !sees) {
     const f = forward(e.yaw); steer(e, f.x * ENEMY_SPEED, f.z * ENEMY_SPEED, AGILITY * .6);
@@ -2945,13 +3112,15 @@ function update() {
   enemies.forEach(updateEnemy);
   allies.forEach(updateAlly);
   updateTanks();
+  const lead = players.find(p => p.alive);           // the commander nags if you hang back from the German line
+  if (lead && --radioTimer <= 0) { radioTimer = 60 * rand(45, 70); if (lead.x < GERMAN_LINE_X - 25) radio(pick(RADIO.push)); }
   updateKrads();
   for (const p of players) if (p.alive) animateSoldier(p, false); else animateDeath(p);
   for (const e of enemies) animateSoldier(e, false);
   for (const a of allies) animateSoldier(a, false);
 
   if (waveTimer > 0) waveTimer--;
-  if (spawnQueue > 0 && --spawnTimer <= 0) { enemies.push(makeEnemy()); spawnQueue--; spawnTimer = SPAWN_GAP; }
+  if (spawnQueue > 0 && --spawnTimer <= 0) { if (spawnDefender()) spawnQueue--; spawnTimer = SPAWN_GAP; }   // reinforcements move up into empty posts
 
   for (const b of bullets) {
     b.x += b.vx; b.z += b.vz; b.life--; b.trav += BULLET_SPEED;

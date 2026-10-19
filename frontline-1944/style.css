@@ -81,3 +81,21 @@ kbd { font-family: var(--mono); background: #3a3c2e; padding: 1px 6px; border-ra
 
 /* get on / get off hint */
 .prompt { position: absolute; bottom: 118px; left: 50%; transform: translateX(-50%); background: rgba(20, 22, 16, .8); padding: 5px 10px; font-size: 12px; white-space: nowrap; color: var(--paper); pointer-events: none; }
+
+/* the market */
+.market { justify-content: flex-start; overflow-y: auto; background: rgba(20, 22, 16, .9); }
+.market .funds { font-family: var(--display); font-size: 24px; color: var(--khaki); }
+.market .small { font-size: 12px; color: var(--muted); }
+.guns { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; width: 100%; max-width: 980px; }
+.gun { background: rgba(48, 46, 30, .85); border: 2px solid rgba(255, 250, 230, .15); padding: 10px; display: grid; gap: 5px; text-align: left; font-size: 12px; }
+.gun.using { border-color: var(--khaki); }
+.gun b { font-family: var(--display); font-size: 17px; font-weight: 400; letter-spacing: .03em; }
+.gun .desc { color: var(--muted); line-height: 1.4; min-height: 3em; }
+.gun .stat { display: grid; grid-template-columns: 70px 1fr; align-items: center; gap: 6px; }
+.gun .stat em { font-style: normal; }
+.statbar { height: 6px; background: rgba(0, 0, 0, .5); }
+.statbar i { display: block; height: 100%; background: var(--khaki); }
+.gun button { font-size: 15px; padding: 6px 10px; margin-top: 4px; }
+.gun button:disabled, .market button:disabled { opacity: .45; cursor: default; background: var(--paper); }
+.market button.who { font-size: 15px; padding: 6px 14px; opacity: .6; }
+.market button.who.on { opacity: 1; }

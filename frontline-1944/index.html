@@ -6,7 +6,7 @@
 <title>Frontline 1944</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Stardos+Stencil:wght@400;700&family=IBM+Plex+Mono:wght@400;600&display=swap">
-<link rel="stylesheet" href="style.css?v=44">
+<link rel="stylesheet" href="style.css?v=46">
 </head>
 <body>
 <div class="wrap">
@@ -53,6 +53,14 @@
         <button id="btn2">2 PLAYERS</button>
       </div>
     </div>
+    <div class="overlay market" id="market" hidden>
+      <h2>QUARTERMASTER</h2>
+      <p class="funds" id="marketFunds"></p>
+      <div class="btns" id="marketWho"></div>
+      <div class="guns" id="marketGuns"></div>
+      <p class="small">You earn 50 funds for every wave you win · Z or Esc to close</p>
+      <div class="btns"><button id="marketClose">BACK TO THE FIGHT</button></div>
+    </div>
     <div class="overlay" id="over" hidden>
       <h2>POSITION LOST</h2>
       <p id="overText"></p>
@@ -63,12 +71,12 @@
   <div class="controls">
     <div><b>1 PLAYER</b><br>Move <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> · Sprint: hold left <kbd>Shift</kbd> · Jump <kbd>J</kbd> · Crouch <kbd>C</kbd> · Ride a Kettenkrad <kbd>F</kbd> · Click the map, then aim with the mouse · Use item (shoot, throw, bandage): click or <kbd>Space</kbd> · Items <kbd>1</kbd>–<kbd>4</kbd> or mouse wheel · Reload <kbd>R</kbd> · No mouse? Turn with <kbd>←</kbd><kbd>→</kbd></div>
     <div><b>2 PLAYERS (split screen)</b><br>Soldier 1: <kbd>W</kbd><kbd>S</kbd> walk, <kbd>A</kbd><kbd>D</kbd> turn, <kbd>Space</kbd> use item, <kbd>1</kbd>–<kbd>4</kbd> items, <kbd>R</kbd> reload, left <kbd>Shift</kbd> sprint, <kbd>J</kbd> jump, <kbd>C</kbd> crouch, <kbd>F</kbd> ride<br>Soldier 2: arrows walk and turn, <kbd>Enter</kbd> use item, <kbd>'</kbd> next item, right <kbd>Shift</kbd> reload, right <kbd>Ctrl</kbd> sprint, <kbd>/</kbd> jump, <kbd>.</kbd> crouch, <kbd>;</kbd> ride</div>
-    <div><b>GAME</b><br>Pause <kbd>P</kbd> · Sound on/off <kbd>M</kbd> · A fallen soldier returns at the start of the next wave · Needs a keyboard</div>
+    <div><b>GAME</b><br>Pause <kbd>P</kbd> · Market (buy guns) <kbd>Z</kbd> · Sound on/off <kbd>M</kbd> · A fallen soldier returns at the start of the next wave · Needs a keyboard</div>
   </div>
 </div>
 
 <!-- Three.js draws the 3D world. It loads from the internet, so you need to be online. -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-<script src="game.js?v=44"></script>
+<script src="game.js?v=46"></script>
 </body>
 </html>

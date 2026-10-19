@@ -7,7 +7,7 @@
 //            5 game rules · 6 drawing · 7 controls
 // ============================================================
 
-const BUILD = 43;             // shown on screen, so you can tell the browser loaded the newest version
+const BUILD = 45;             // shown on screen, so you can tell the browser loaded the newest version
 document.querySelector(".tag").textContent += " · build " + BUILD;
 
 // ---------- 1) SETTINGS: change these to tweak the game ----------
@@ -50,8 +50,12 @@ const KRADS_ALLY = 4;         // Kettenkrads parked near your start (topped up e
 const KRADS_ENEMY = 3;        // German Kettenkrads that arrive each wave, two soldiers on each
 const KRAD_SPEED = .28;       // top speed (map units per frame: .28 is about 60 km/h)
 const KRAD_HP = 150;
+const FUNDS_PER_WAVE = 50;    // money earned for every wave you win (spend it in the market: Z)
 const MAG_SIZE = 8;
 const RELOAD_TIME = 70;
+const HILLS = 18;             // how many hills (plus two long ridges)
+const HILL_HEIGHT = 7.5;      // the tallest hills, in metres
+const HILLS_FROM = 62;        // how far from the middle the hills start
 const MINX = -160, MAXX = 160, MINZ = -104, MAXZ = 104;   // edges of the battlefield (inside the barbed wire)
 const WORLD_X = 230, WORLD_Z = 175;   // half the size of the whole landscape, including the woods outside the wire
 
@@ -359,11 +363,47 @@ function cratersNear(x, z) {
   }
   return craterCells.get(Math.floor(x / 10) + "," + Math.floor(z / 10)) || [];
 }
+// hills and ridges: big smooth rises out in the battlefield and the woods. The middle (house, trenches,
+// start positions) stays flat; the hills begin around HILLS_FROM metres out and grow from there.
+const hills = [];
+(function makeHills() {
+  for (let i = 0; i < HILLS; i++) {
+    const r = rand(20, 42);
+    hills.push({ x: rand(-WORLD_X + 15, WORLD_X - 15), z: rand(-WORLD_Z + 15, WORLD_Z - 15), rx: r * rand(.8, 1.3), rz: r * rand(.8, 1.3), a: rand(0, 6.3), h: rand(2.5, HILL_HEIGHT) });
+  }
+  for (let i = 0; i < 2; i++)        // long ridges
+    hills.push({ x: rand(-WORLD_X + 40, WORLD_X - 40), z: rand(-WORLD_Z + 40, WORLD_Z - 40), rx: rand(60, 110), rz: rand(14, 20), a: rand(0, 6.3), h: rand(3, 5) });
+})();
+function hillExact(x, z) {
+  const e = Math.hypot(x / HILLS_FROM, z / (HILLS_FROM * .68));
+  const open = clamp01((e - 1) / .7), flat = open * open * (3 - 2 * open);   // 0 in the flat middle, rising smoothly to 1
+  if (flat === 0) return 0;
+  let y = 0;
+  for (const h of hills) {
+    const dx = x - h.x, dz = z - h.z, c = Math.cos(h.a), sn = Math.sin(h.a);
+    const u = (dx * c + dz * sn) / h.rx, v = (-dx * sn + dz * c) / h.rz, d = u * u + v * v;
+    if (d < 9) y += h.h * Math.exp(-d);
+  }
+  return y * flat;
+}
+let hillGrid = null;
+function hillHeight(x, z) {          // looked up from the grid (much faster than adding up every hill each time)
+  if (!hillGrid) {
+    const nx = WORLD_X + 1, nz = WORLD_Z + 1, g = new Float32Array(nx * nz);
+    for (let j = 0; j < nz; j++) for (let i = 0; i < nx; i++) g[j * nx + i] = hillExact(i * 2 - WORLD_X, j * 2 - WORLD_Z);
+    hillGrid = { g, nx, nz };
+  }
+  const fx = (x + WORLD_X) / 2, fz = (z + WORLD_Z) / 2, i = Math.floor(fx), j = Math.floor(fz);
+  if (i < 0 || j < 0 || i >= hillGrid.nx - 1 || j >= hillGrid.nz - 1) return 0;
+  const u = fx - i, v = fz - j, g = hillGrid.g, n = hillGrid.nx, k = j * n + i;
+  return (g[k] * (1 - u) + g[k + 1] * u) * (1 - v) + (g[k + n] * (1 - u) + g[k + n + 1] * u) * v;
+}
 // how high the ground is at a spot: gentle rolls (flat by the walls) plus crater dips with raised rims
 function groundY(x, z, visual = false) {
   const edge = clamp01((WORLD_X - Math.abs(x)) / 12) * clamp01((WORLD_Z - Math.abs(z)) / 12);
   const nearHouse = Math.hypot(Math.max(HOUSE.x0 - .5 - x, 0, x - HOUSE.x1 - .5), Math.max(HOUSE.z0 - .5 - z, 0, z - HOUSE.z1 - .5));
   let y = (fbm(x * .07, z * .07) - .5) * .55 * Math.min(1, wallGap(x, z) / 3) * edge * clamp01(nearHouse / 1.5);   // level where the house stands
+  y += hillHeight(x, z) * edge;
   for (const c of cratersNear(x, z)) {
     const d = Math.hypot(x - c.x, z - c.z) / c.r;
     if (d < 1.7) y += c.r * .14 * (-Math.max(0, 1 - d * d) + .35 * Math.exp(-(((d - 1) * 3.5) ** 2)));
@@ -458,8 +498,8 @@ for (const w of walls) {
         const bag = new THREE.Mesh(new THREE.BoxGeometry(long ? size * .95 : thick * .9, .42, long ? thick * .9 : size * .95),
           (i + row) % 2 ? bagMat : bagMat2);
         const along = (i + .5 + (row % 2 ? .25 : 0)) * size;
-        bag.position.set(long ? w.x + Math.min(along, len - size / 2) : w.x + w.w / 2, .22 + row * .42,
-                         long ? w.z + w.d / 2 : w.z + Math.min(along, len - size / 2));
+        const bx = long ? w.x + Math.min(along, len - size / 2) : w.x + w.w / 2, bz = long ? w.z + w.d / 2 : w.z + Math.min(along, len - size / 2);
+        bag.position.set(bx, groundY(bx, bz) + .2 + row * .42, bz);
         bag.castShadow = bag.receiveShadow = true;
         scene.add(bag);
       }
@@ -468,11 +508,17 @@ for (const w of walls) {
     for (let i = 0; i < len; i += 1) {                // jagged broken top
       const h = 1.6 + Math.random() * 2.2;
       const b = new THREE.Mesh(new THREE.BoxGeometry(long ? 1 : thick, h, long ? thick : 1), brickMat);
-      b.position.set(long ? w.x + i + .5 : w.x + w.w / 2, h / 2, long ? w.z + w.d / 2 : w.z + i + .5);
+      const bx = long ? w.x + i + .5 : w.x + w.w / 2, bz = long ? w.z + w.d / 2 : w.z + i + .5;
+      b.position.set(bx, groundY(bx, bz) + h / 2 - .15, bz);   // sunk a little into the ground
       b.castShadow = b.receiveShadow = true;
       scene.add(b);
     }
   }
+}
+// on a slope a wall's top is higher at one end: work out where it starts and stops for bullets and walking
+for (const w of walls) if (w.type === "bags" || w.type === "ruin") {
+  const ys = [[0, 0], [1, 0], [0, 1], [1, 1], [.5, .5]].map(([a, b]) => groundY(w.x + w.w * a, w.z + w.d * b));
+  w.base = Math.min(...ys) - .2; w.top = Math.max(...ys) + (w.type === "bags" ? 1.3 : 2.6);
 }
 
 // Barbed-wire fence around the edge
@@ -1277,7 +1323,7 @@ const ICONS = {
 function buildHotbar(p) {
   const bar = document.getElementById("hotbar" + p.num);
   bar.innerHTML = p.inv.map((it, i) =>
-    `<div class="slot"><span class="key">${p.num === 1 ? i + 1 : ""}</span>${ICONS[it.id]}<span class="count"></span><span class="label">${ITEMS[it.id].name}</span></div>`).join("");
+    `<div class="slot"><span class="key">${p.num === 1 ? i + 1 : ""}</span>${ICONS[it.id]}<span class="count"></span><span class="label">${it.id === "rifle" ? GUNS[p.gun || "enfield"].name : ITEMS[it.id].name}</span></div>`).join("");
 }
 function updateHotbar(p) {
   const slots = document.getElementById("hotbar" + p.num).children;
@@ -1974,6 +2020,143 @@ function kradSound() {               // a buzzing motorbike engine whose note ri
   kradEngine.g.gain.setTargetAtTime(loud * .16, t, .08);
 }
 
+// ---------- GUNS AND THE MARKET: earn funds by winning waves, buy guns with Z ----------
+// dmg: damage per bullet · cool: frames between shots · mag: rounds · reload: frames · spread: aim wobble · range: how far it reaches
+const GUNS = {
+  enfield:  { name: "Lee-Enfield No. 4", price: 0, dmg: 20, cool: 12, mag: 8, reload: 70, spread: .02, range: 45, len: 1.2, sound: "rifle",
+    desc: "The British infantry rifle. Accurate and reliable." },
+  garand:   { name: "M1 Garand", price: 50, dmg: 22, cool: 8, mag: 8, reload: 60, spread: .02, range: 50, len: 1.2, sound: "rifle",
+    desc: "American semi-automatic rifle: fires as fast as you can pull the trigger." },
+  sten:     { name: "Sten Mk II", price: 75, dmg: 11, cool: 5, mag: 32, reload: 80, spread: .06, range: 30, len: .78, sound: "mg",
+    desc: "Cheap British submachine gun. Sprays bullets, best up close." },
+  thompson: { name: "Thompson M1A1", price: 100, dmg: 13, cool: 4, mag: 30, reload: 85, spread: .055, range: 32, len: .86, sound: "mg",
+    desc: "The 'Tommy gun'. A very fast stream of heavy pistol rounds." },
+  trench:   { name: "Winchester M1897", price: 125, dmg: 10, pellets: 8, cool: 32, mag: 6, reload: 120, spread: .11, range: 22, len: 1.04, sound: "rifle",
+    desc: "Pump-action trench gun. A blast of pellets that clears a trench." },
+  sniper:   { name: "Lee-Enfield No. 4 (T)", price: 150, dmg: 80, cool: 45, mag: 5, reload: 90, spread: .003, range: 95, len: 1.2, sound: "rifle",
+    desc: "Sniper rifle with a telescopic sight. One shot, one kill, at long range." },
+  bren:     { name: "Bren gun", price: 200, dmg: 18, cool: 6, mag: 30, reload: 140, spread: .04, range: 55, len: 1.15, sound: "mg",
+    desc: "British light machine gun. Heavy, hard-hitting automatic fire." },
+};
+const GUN_ORDER = ["enfield", "garand", "sten", "thompson", "trench", "sniper", "bren"];
+const gunGeos = {};
+function gunGeometry(id) {           // each gun is laid along +z: butt at z = 0, muzzle at z = len, barrel line at y = 0
+  if (gunGeos[id]) return gunGeos[id];
+  if (id === "enfield") return gunGeos[id] = rifleGeos.british || (rifleGeos.british = rifleGeometry("british"));
+  if (id === "garand") return gunGeos[id] = rifleGeos.american || (rifleGeos.american = rifleGeometry("american"));
+  const steel = 0x2a2b2d, worn = 0x45464a, wood = 0x7a5230, dark = 0x1f1f1e, P = [];
+  const box = (w, h, d, at, color, rot) => P.push({ geo: new THREE.BoxGeometry(w, h, d), at, color, rot });
+  const tube = (r, z0, z1, y, color, x = 0, seg = 10) => P.push({ geo: new THREE.CylinderGeometry(r, r, z1 - z0, seg).rotateX(Math.PI / 2), at: [x, y, (z0 + z1) / 2], color });
+  const stock = (len, color) => P.push({ geo: sideProfile([[0, .025], [len * .66, .008], [len * .85, 0], [len, -.012], [len, -.05], [len * .85, -.056], [len * .7, -.07], [0, -.15]], .046), at: [0, 0, 0], color });
+  if (id === "sniper") {
+    P.push({ geo: gunGeometry("enfield"), at: [0, 0, 0], color: wood });
+    tube(.021, .36, .68, .085, dark);                                     // telescopic sight
+    tube(.026, .36, .41, .085, dark); tube(.026, .63, .68, .085, dark);    // its two bells
+    box(.02, .05, .03, [0, .055, .44], steel); box(.02, .05, .03, [0, .055, .6], steel);   // mounts
+    box(.04, .03, .07, [0, .03, .18], 0x5a3a20);                          // cheek rest
+  } else if (id === "sten") {
+    for (const y of [.02, -.08]) tube(.007, 0, .26, y, steel);             // skeleton stock: a bent steel tube
+    box(.012, .12, .012, [0, -.03, .005], steel);
+    tube(.022, .26, .62, 0, steel);                                       // receiver tube
+    tube(.017, .62, .76, 0, worn, 0, 8);                                  // barrel shroud
+    tube(.009, .76, .79, 0, steel);
+    box(.2, .036, .03, [-.12, -.005, .48], dark);                         // magazine sticking out to the left
+    box(.02, .07, .03, [0, -.05, .34], steel);                            // trigger housing
+    box(.018, .022, .03, [0, -.03, .37], steel, [.4, 0, 0]);
+  } else if (id === "thompson") {
+    stock(.3, wood);
+    box(.045, .065, .26, [0, -.005, .43], worn);                          // receiver
+    for (let i = 0; i < 9; i++) tube(.019, .58 + i * .022, .59 + i * .022, 0, steel);   // cooling fins round the barrel
+    tube(.012, .56, .86, 0, steel);
+    box(.03, .05, .02, [0, .01, .84], steel);                             // compensator
+    box(.03, .2, .045, [0, -.12, .48], dark);                             // stick magazine
+    box(.035, .1, .04, [0, -.07, .36], wood, [-.25, 0, 0]);               // pistol grip
+    box(.035, .09, .04, [0, -.06, .66], wood, [.2, 0, 0]);                // front grip
+    box(.008, .025, .012, [0, .04, .5], steel);                           // rear sight
+  } else if (id === "trench") {
+    stock(.39, wood);
+    box(.045, .07, .16, [0, -.005, .47], worn);                           // receiver
+    tube(.014, .55, 1.04, .012, steel);                                   // barrel
+    tube(.012, .55, .95, -.022, steel);                                   // magazine tube under the barrel
+    tube(.022, .62, .8, -.02, wood);                                      // pump slide
+    box(.035, .02, .26, [0, .035, .86], worn);                            // heat shield over the barrel
+    box(.012, .025, .04, [0, -.02, .97], steel);                          // bayonet lug
+    P.push({ geo: new THREE.TorusGeometry(.028, .005, 4, 10, Math.PI), at: [0, -.045, .41], rot: [0, Math.PI / 2, Math.PI], color: steel });
+  } else if (id === "bren") {
+    P.push({ geo: sideProfile([[0, .03], [.2, .01], [.3, 0], [.3, -.05], [.2, -.06], [0, -.14]], .05), at: [0, 0, 0], color: worn });   // steel butt
+    box(.03, .1, .04, [0, -.075, .36], wood, [-.25, 0, 0]);               // pistol grip
+    box(.06, .08, .34, [0, -.005, .48], worn);                            // receiver
+    P.push({ geo: new THREE.BoxGeometry(.035, .2, .07).translate(0, .1, 0), at: [0, .03, .5], rot: [.35, 0, 0], color: dark });   // curved magazine on top
+    tube(.016, .64, 1.08, 0, steel);                                      // barrel
+    tube(.026, .64, .75, 0, worn);                                        // gas block
+    P.push({ geo: new THREE.CylinderGeometry(.02, .028, .07, 10).rotateX(Math.PI / 2), at: [0, 0, 1.11], color: steel });   // cone flash hider
+    box(.015, .06, .12, [0, .055, .76], worn);                            // carrying handle
+    for (const s of [-1, 1]) P.push({ geo: new THREE.CylinderGeometry(.007, .007, .3, 6), at: [s * .03, -.04, .86], rot: [Math.PI / 2 - .25, 0, s * .1], color: steel });   // folded bipod
+    box(.008, .04, .012, [-.035, .06, .62], steel);                       // offset sights
+  }
+  return gunGeos[id] = mergeParts(P, .1, true);
+}
+function equipGun(p, id) {
+  p.gun = id;
+  const g = GUNS[id];
+  p.rifle.geometry = gunGeometry(id);
+  p.muzzle.position.z = .02 + g.len;
+  p.ammo = g.mag; p.reload = 0; p.cool = 10;
+  buildHotbar(p);
+}
+function fireGun(p) {
+  const g = GUNS[p.gun || "enfield"];
+  for (let i = 0; i < (g.pellets || 1); i++)
+    shoot(p, p.yaw, "ally", g.spread, null, { dmg: g.dmg, range: g.range, sound: g.sound, silent: i > 0 });
+}
+
+// the market screen
+let funds = 0, marketOpen = false, marketWasPaused = false, marketFor = 0;
+function openMarket() {
+  if (state !== "play") return;
+  marketOpen = true; marketWasPaused = paused; paused = true;
+  if (document.pointerLockElement) document.exitPointerLock();
+  mouse.down = false; for (const k in keys) keys[k] = false;
+  document.getElementById("market").hidden = false;
+  renderMarket();
+  play("bolt", undefined, undefined, { vol: .4 });
+}
+function closeMarket() {
+  marketOpen = false; paused = marketWasPaused;
+  document.getElementById("market").hidden = true;
+}
+function renderMarket() {
+  const p = players[marketFor] || players[0];
+  document.getElementById("marketFunds").textContent = `FUNDS: ${funds}`;
+  document.getElementById("marketWho").innerHTML = twoPlayer
+    ? players.map((q, i) => `<button class="who${i === marketFor ? " on" : ""}" data-who="${i}">SOLDIER ${q.num}</button>`).join("") : "";
+  const bar = (v, max) => `<span class="statbar"><i style="width:${Math.round(Math.min(1, v / max) * 100)}%"></i></span>`;
+  document.getElementById("marketGuns").innerHTML = GUN_ORDER.map(id => {
+    const g = GUNS[id], owned = p.owned.has(id), using = p.gun === id;
+    const perSec = 60 / g.cool, dmg = g.dmg * (g.pellets || 1);
+    const action = using ? `<button disabled>IN HAND</button>`
+      : owned ? `<button data-equip="${id}">EQUIP</button>`
+      : `<button data-buy="${id}"${funds < g.price ? " disabled" : ""}>BUY · ${g.price}</button>`;
+    return `<div class="gun${using ? " using" : ""}">
+      <b>${g.name}</b><span class="desc">${g.desc}</span>
+      <span class="stat">Damage ${bar(dmg, 80)}</span><span class="stat">Fire rate ${bar(perSec, 15)}</span>
+      <span class="stat">Range ${bar(g.range, 95)}</span><span class="stat">Magazine <em>${g.mag}</em></span>
+      ${action}</div>`;
+  }).join("");
+}
+document.getElementById("market").addEventListener("click", e => {
+  const b = e.target.closest("button");
+  if (!b || b.disabled) return;
+  const p = players[marketFor] || players[0];
+  if (b.dataset.who) marketFor = +b.dataset.who;
+  else if (b.dataset.buy) {
+    const id = b.dataset.buy;
+    if (funds >= GUNS[id].price) { funds -= GUNS[id].price; p.owned.add(id); equipGun(p, id); play("reload", p.x, p.z); }
+  } else if (b.dataset.equip) { equipGun(p, b.dataset.equip); play("reload", p.x, p.z); }
+  else if (b.id === "marketClose") { closeMarket(); return; }
+  renderMarket();
+});
+
 // ---------- 4) THE SOLDIERS ----------
 // Three armies of 1944, each with its own uniform, helmet, kit and rifle.
 const KITS = {
@@ -2400,7 +2583,7 @@ function updateHealthBar(p) {
 function makePlayer(num) {
   const s = buildSoldier(num === 1 ? "british" : "american");
   return {
-    num, x: num === 1 ? -10 : 10, z: 0, y: groundY(num === 1 ? -10 : 10, 0), yaw: 0, r: .5, hp: MAX_HP, ammo: MAG_SIZE, reload: 0, cool: 0,
+    num, x: num === 1 ? -10 : 10, z: 0, y: groundY(num === 1 ? -10 : 10, 0), yaw: 0, r: .5, hp: MAX_HP, ammo: MAG_SIZE, reload: 0, gun: "enfield", owned: new Set(num === 2 ? ["enfield", "garand"] : ["enfield"]), cool: 0,
     alive: true, inv: newInventory(), slot: 0, bandaging: 0, shake: 0, vx: 0, vz: 0, jumpY: 0, vy: 0, land: 0, sinceHit: 0, healing: false, crouched: false, crouchAmt: 0, walk: 0, gait: 0, kick: 0, ...s, bar: makeHealthBar(s.group),
     cam: new THREE.PerspectiveCamera(65, 1, .1, 330),
   };
@@ -2471,7 +2654,9 @@ function startGame(n) {
   twoPlayer = n === 2;
   players = [makePlayer(1)];
   if (twoPlayer) players.push(makePlayer(2));
-  wave = 0; score = 0; paused = false;
+  wave = 0; score = 0; paused = false; funds = 0;
+  if (marketOpen) closeMarket();
+  for (const p of players) equipGun(p, p.num === 2 ? "garand" : "enfield");
   for (let i = 0; i < ALLIES; i++) allies.push(makeAlly());
   nextWave();
   state = "play";
@@ -2580,15 +2765,14 @@ function stepHeight(s, jump) {        // stairs, the upstairs floor, jumping and
 
 // target: who an enemy is aiming at. Players can't aim up or down, so their shots tilt
 // towards the nearest enemy roughly in front (that is how you hit people below from upstairs)
-function shoot(from, yaw, team, spread, target) {
+function shoot(from, yaw, team, spread, target, opt = {}) {
   const a = yaw + rand(-spread, spread), f = forward(a);
-  from.kick = 1;                                         // rifle recoil, shown in poseSoldier
-  from.eject = 16;                                       // the empty case flies out as the bolt is worked
+  if (!opt.silent) { from.kick = 1; from.eject = 16; }   // recoil, and the empty case flies out
   if (!target) {
     let best = .22;
     for (const e of enemies) {
       const off = Math.abs(Math.atan2(Math.sin(Math.atan2(e.x - from.x, e.z - from.z) - yaw), Math.cos(Math.atan2(e.x - from.x, e.z - from.z) - yaw)));
-      if (off < best && dist(from, e) < 45) { best = off; target = e; }
+      if (off < best && dist(from, e) < (opt.range || 45)) { best = off; target = e; }
     }
   }
   const h0 = (from.y || 0) + (from.crouched ? 1.2 : 1.5), reach = target ? Math.max(1, dist(from, target)) : 30;
@@ -2597,11 +2781,12 @@ function shoot(from, yaw, team, spread, target) {
   const mesh = new THREE.Mesh(bulletGeo, team === "ally" ? allyTracer : enemyTracer);
   mesh.rotation.order = "YXZ"; mesh.rotation.set(-Math.atan2(h1 - h0, reach), a, 0); scene.add(mesh);
   bullets.push({ x: from.x + f.x * 1.2, z: from.z + f.z * 1.2, y: h0, h0, h1, reach, trav: 1.2, lift,
-    vx: f.x * BULLET_SPEED, vz: f.z * BULLET_SPEED, team, life: 60, mesh });
+    vx: f.x * BULLET_SPEED, vz: f.z * BULLET_SPEED, team, life: Math.ceil(((opt.range || 45) + 20) / BULLET_SPEED), mesh, dmg: opt.dmg });
   mesh.position.set(from.x + f.x * 1.2, h0, from.z + f.z * 1.2);
+  if (opt.silent) return;
   from.group.position.set(from.x, from.y || 0, from.z); from.group.rotation.y = from.yaw;   // bring the model up to date
   muzzleFlash(from.muzzle.getWorldPosition(muzzlePos), a);
-  play("rifle", from.x, from.z, { enemy: team === "enemy" });
+  play(opt.sound || "rifle", from.x, from.z, { enemy: team === "enemy" });
 }
 
 function updatePlayer(p) {
@@ -2662,7 +2847,8 @@ function updatePlayer(p) {
   if (p.healing) p.hp = Math.min(MAX_HP, p.hp + REGEN_RATE);
 
   if (p.cool > 0) p.cool--;
-  if (p.reload > 0 && --p.reload === 0) p.ammo = MAG_SIZE;
+  const gun = GUNS[p.gun || "enfield"];
+  if (p.reload > 0 && --p.reload === 0) p.ammo = gun.mag;
   if (p.bandaging > 0) { p.bandaging--; p.hp = Math.min(MAX_HP, p.hp + BANDAGE_HEAL / BANDAGE_TIME); }   // bandage going on
 
   // choosing an item: number keys or the mouse wheel for soldier 1, the ' key for soldier 2
@@ -2679,10 +2865,10 @@ function updatePlayer(p) {
   p.fireHeld = firing;
   if (item.id === "rifle") {
     const reloadKey = p.num === 1 ? keys.KeyR : keys.ShiftRight;
-    if (reloadKey && p.ammo < MAG_SIZE && !p.reload) { p.reload = RELOAD_TIME; play("reload", p.x, p.z); }
+    if (reloadKey && p.ammo < gun.mag && !p.reload) { p.reload = gun.reload; play("reload", p.x, p.z); }
     if (firing && p.cool === 0 && !p.reload) {
-      if (p.ammo > 0) { shoot(p, p.yaw, "ally", .02); p.ammo--; p.cool = 12; }
-      else { p.reload = RELOAD_TIME; play("reload", p.x, p.z); }
+      if (p.ammo > 0) { fireGun(p); p.ammo--; p.cool = gun.cool; }
+      else { p.reload = gun.reload; play("reload", p.x, p.z); }
     }
   } else if (item.id === "grenade" || item.id === "smoke") {
     if (pressed && item.count > 0 && p.cool === 0) { throwGrenade(p, item.id); item.count--; p.cool = 40; }
@@ -2786,7 +2972,7 @@ function update() {
       if (b.life > 0 && dist(b, v) < .6 && b.y > (v.y || 0) - .2 && b.y < (v.y || 0) + 2.3) {
         b.life = 0;
         play("hit", v.x, v.z);
-        v.hp -= b.team === "ally" ? 20 : 12;
+        v.hp -= b.dmg ?? (b.team === "ally" ? 20 : 12);
         v.sinceHit = 0;                                    // getting hit stops recovery for a while
         v.lastHit = { dx: b.vx, dz: b.vz };               // which way the bullet was going (decides how they fall)
         if (v.uni && b.team === "ally") { v.uni.emissive.setHex(0x777777); v.flash = 6; }
@@ -2836,6 +3022,7 @@ function update() {
     document.getElementById("over").hidden = false;
   } else if (spawnQueue === 0 && enemies.length === 0 && !krads.some(k => k.riders.length && !k.dead)) {
     score += wave * 250;
+    funds += FUNDS_PER_WAVE;
     nextWave();
   }
 }
@@ -3126,12 +3313,12 @@ function updateHUD() {
     p.hurtFlash = (p.hurtFlash || 0) * .93;               // red flash when hit, and a faint glow while health is low
     const low = p.alive ? clamp01((.35 - p.hp / MAX_HP) / .35) * .45 : .6;
     document.getElementById("hurt" + p.num).style.opacity = Math.max(p.hurtFlash * .75, low);
-    document.getElementById("ammo" + p.num).textContent = p.reload ? "RELOADING..." : "AMMO " + "▮".repeat(p.ammo) + "▯".repeat(MAG_SIZE - p.ammo);
+    document.getElementById("ammo" + p.num).textContent = p.reload ? "RELOADING..." : (GUNS[p.gun].mag <= 10 ? "AMMO " + "▮".repeat(p.ammo) + "▯".repeat(GUNS[p.gun].mag - p.ammo) : `AMMO ${p.ammo} / ${GUNS[p.gun].mag}`);
   });
-  document.getElementById("topline").textContent = `WAVE ${wave} · SCORE ${score} · ALLIES ${allies.length} · ENEMIES ${enemies.length + spawnQueue + krads.reduce((n, k) => n + k.riders.length, 0)} · TANKS ${tanks.filter(t => !t.dead && t.side === "ally").length} v ${tanks.filter(t => !t.dead && t.side === "enemy").length}`;
+  document.getElementById("topline").textContent = `WAVE ${wave} · SCORE ${score} · FUNDS ${funds} · ALLIES ${allies.length} · ENEMIES ${enemies.length + spawnQueue + krads.reduce((n, k) => n + k.riders.length, 0)} · TANKS ${tanks.filter(t => !t.dead && t.side === "ally").length} v ${tanks.filter(t => !t.dead && t.side === "enemy").length}`;
   const banner = document.getElementById("banner");
-  banner.textContent = paused ? "PAUSED" : "WAVE " + wave;
-  banner.style.opacity = paused || waveTimer > 0 ? 1 : 0;
+  banner.textContent = paused ? "PAUSED" : "WAVE " + wave + (wave > 1 ? ` · +${FUNDS_PER_WAVE} FUNDS` : "");
+  banner.style.opacity = !marketOpen && (paused || waveTimer > 0) ? 1 : 0;
   document.getElementById("hint").hidden = !(state === "play" && !twoPlayer && document.pointerLockElement !== canvas);
 }
 function layoutPanes() {
@@ -3167,6 +3354,9 @@ window.addEventListener("keydown", e => {
   if (state === "play" && gameKeys.includes(e.code)) e.preventDefault();
   startSound();
   if (e.code === "KeyM") toggleMute();
+  if (e.code === "KeyZ" && state === "play") { marketOpen ? closeMarket() : openMarket(); return; }
+  if (e.code === "Escape" && marketOpen) { closeMarket(); return; }
+  if (marketOpen) return;
   if (e.code === "KeyP" && state === "play") paused = !paused;
   keys[e.code] = true;
 });
@@ -3176,7 +3366,7 @@ window.addEventListener("blur", () => { for (const k in keys) keys[k] = false; m
 // Mouse aiming: clicking the battlefield "captures" the mouse so moving it turns you
 stage.addEventListener("mousedown", e => {
   startSound();
-  if (state !== "play" || twoPlayer) return;
+  if (state !== "play" || twoPlayer || marketOpen) return;
   if (document.pointerLockElement !== canvas) {
     try { const r = canvas.requestPointerLock(); if (r && r.catch) r.catch(() => {}); } catch (err) { /* arrows still work */ }
   } else mouse.down = true;

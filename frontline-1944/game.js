@@ -7,7 +7,7 @@
 //            5 game rules · 6 drawing · 7 controls
 // ============================================================
 
-const BUILD = 49;             // shown on screen, so you can tell the browser loaded the newest version
+const BUILD = 53;             // shown on screen, so you can tell the browser loaded the newest version
 document.querySelector(".tag").textContent += " · build " + BUILD;
 
 // ---------- 1) SETTINGS: change these to tweak the game ----------
@@ -49,6 +49,12 @@ const TANK_ARMOUR_BLAST = 1.8;   // how much blasts hurt tanks
 const KRADS_ALLY = 4;         // Kettenkrads parked near your start (topped up each wave)
 const KRADS_ENEMY = 0;        // German Kettenkrads that arrive each wave, two soldiers on each (0: the Germans stay in their trenches)
 const GERMAN_LINE_X = 96;     // where the German trench line runs across the field
+const PLANE_SPEED = .62;      // how fast the planes fly (map units per frame)
+const ROCKET_SPEED = 1.9;     // how fast rockets fly
+const ROCKET_POWER = 1;       // a rocket hits as hard as a grenade
+const ROCKET_GAP = 22;        // frames between your rockets
+const PLANE_ATTACK_GAP = 60 * 32;   // how often the German plane makes an attack run
+const PLANE_PARK = [-48, -26]; // where your plane waits on its airstrip
 const TENT_HP = 500;          // how much it takes to destroy a medic tent
 const BRITISH_TENT = [-40, 14]; // where your medic tent stands
 const ATTACK_SHARE = 0.5;     // share of Germans who climb out of their trench and come for you (the rest hold it)
@@ -93,7 +99,22 @@ const walls = [
   { x: 36,  z: 44,  w: 10, d: 1.2, type: "ruin" },
   { x: 60,  z: 20,  w: 1.2, d: 9, type: "ruin" },
   { x: 30,  z: -34, w: 8, d: 1.2, type: "ruin" },
+  { x: -55, z: -33, w: 14, d: 14, type: "airstrip", top: -5 },   // where your plane parks (kept clear, blocks nothing)
 ];
+// ---------- BOMB SHELTERS: five for each side. Inside one you're safe from blasts and bullets ----------
+// x, z = the middle; dir = which way the doorway faces (-1: west, away from the Germans; +1: east)
+const shelters = [
+  ...[[-50, -4], [-50, 9], [-57, 24], [-58, -14], [-34, -36]].map(([x, z]) => ({ x, z, side: "ally", dir: -1 })),
+  ...[[136, -50], [136, -4], [139, 20], [136, 60], [146, 36]].map(([x, z]) => ({ x, z, side: "enemy", dir: 1 })),
+];
+const SH = { len: 2.2, half: 1.35 };  // half the length (x), half the width (z) of the inside
+for (const sh of shelters) {         // solid sides and a solid end facing the enemy; the doorway is left open
+  const t = .35, top = 2.4, back = sh.x - sh.dir * SH.len;
+  walls.push({ x: sh.x - SH.len, z: sh.z - SH.half - t, w: SH.len * 2, d: t, type: "shelter", top });
+  walls.push({ x: sh.x - SH.len, z: sh.z + SH.half, w: SH.len * 2, d: t, type: "shelter", top });
+  walls.push({ x: Math.min(back, back - sh.dir * t), z: sh.z - SH.half - t, w: t, d: (SH.half + t) * 2, type: "shelter", top });
+}
+const inShelter = s => shelters.some(sh => Math.abs(s.x - sh.x) < SH.len - .1 && Math.abs(s.z - sh.z) < SH.half - .05);
 (function moreCover() {              // the outer battlefield gets its own sandbag positions and ruins
   for (let tries = 0, n = 0; n < 34 && tries < 3000; tries++) {
     const x = (Math.random() * 2 - 1) * (MAXX - 12), z = (Math.random() * 2 - 1) * (MAXZ - 12);
@@ -104,7 +125,7 @@ const walls = [
     walls.push(w); n++;
   }
 })();
-for (const w of walls) w.top = w.type === "bags" ? 1.3 : 2.6;   // how tall each wall is (bullets fly over low ones from up high)
+for (const w of walls) if (w.top === undefined) w.top = w.type === "bags" ? 1.3 : 2.6;   // how tall each wall is (bullets fly over low ones from up high)
 
 // ---------- the bombed-out house: two storeys, the top one mostly blown away into an open flat roof ----------
 const HOUSE = { x0: 19, x1: 33, z0: 0, z1: 10, floor: 3.2, t: .3, inner: 26 };   // outside corners, upstairs floor height, wall thickness, inside wall
@@ -515,7 +536,7 @@ const bagMat = new THREE.MeshLambertMaterial({ color: 0xb9a676 });
 const bagMat2 = new THREE.MeshLambertMaterial({ color: 0xa8956a });
 const brickMat = new THREE.MeshLambertMaterial({ color: 0x8c6a56 });
 for (const w of walls) {
-  if (w.type === "house") continue;                   // the house is drawn separately
+  if (w.type === "house" || w.type === "airstrip" || w.type === "shelter") continue;                   // the house is drawn separately
   const long = w.w > w.d, len = long ? w.w : w.d, thick = long ? w.d : w.w;
   if (w.type === "bags") {
     for (let row = 0; row < 3; row++) {
@@ -975,6 +996,33 @@ function leafCluster(L, center, radius, crownCenter, count, tint, cardSize = 1.1
   flag(GERMAN_LINE_X + 18, 6, germanFlag, 300 / 180);
 })();
 
+// The shelters: British Anderson shelters (a corrugated steel arch buried under earth, sandbags at the door)
+// and German concrete bunkers
+(function makeShelters() {
+  const P = [], earth = 0x6a5a40, grass = 0x5f7036, steel = 0x6b6e66, rust = 0x7a5a3e, bags = [0xb9a676, 0xa8956a], conc = [0x8c8a82, 0x7f7d75], dark = 0x161512;
+  for (const sh of shelters) {
+    const y = groundY(sh.x, sh.z), d = sh.dir, front = sh.x + d * SH.len;   // "front" = the doorway end
+    if (sh.side === "ally") {
+      for (let i = 0; i < 9; i++) {                    // corrugated arch, built from ribs so it looks ridged
+        const x = sh.x - SH.len + .25 + i * (SH.len * 2 - .5) / 8;
+        P.push({ geo: new THREE.CylinderGeometry(SH.half + .25, SH.half + .25, .26, 18, 1, true, 0, Math.PI).rotateZ(Math.PI / 2).rotateX(-Math.PI / 2), at: [x, y, sh.z], color: i % 2 ? steel : rust });
+      }
+      P.push({ geo: new THREE.SphereGeometry(1, 18, 10, 0, Math.PI * 2, 0, Math.PI / 2).scale(SH.len + 1.1, 2.15, SH.half + 1.3), at: [sh.x - d * .2, y - .05, sh.z], color: earth });   // earth piled over it
+      P.push({ geo: new THREE.SphereGeometry(1, 18, 10, 0, Math.PI * 2, 0, Math.PI / 2).scale(SH.len + .7, 1.95, SH.half + .9), at: [sh.x - d * .2, y + .2, sh.z], color: grass });   // turf on top
+      P.push({ geo: new THREE.BoxGeometry(.06, 1.9, SH.half * 2), at: [front - d * .05, y + .95, sh.z], color: dark });   // the dark doorway
+      for (let row = 0; row < 4; row++) for (let i = 0; i < 4; i++)   // a sandbag blast wall in front of the door, with a gap to walk round
+        P.push({ geo: new THREE.BoxGeometry(.4, .24, .7), at: [front + d * 1.3, y + .12 + row * .24, sh.z - SH.half - .1 + i * .72 + (row % 2) * .2], color: bags[(i + row) % 2] });
+    } else {
+      P.push({ geo: new THREE.BoxGeometry(SH.len * 2 + .9, 2.5, SH.half * 2 + 1), at: [sh.x - d * .2, y + 1.2, sh.z], color: conc[0] });   // concrete block
+      P.push({ geo: new THREE.BoxGeometry(SH.len * 2 + 1.3, .3, SH.half * 2 + 1.4), at: [sh.x - d * .2, y + 2.5, sh.z], color: conc[1] });   // thick roof slab
+      P.push({ geo: new THREE.BoxGeometry(.06, 1.95, SH.half * 1.4), at: [front + d * .23, y + .98, sh.z], color: dark });   // steel door opening
+      P.push({ geo: new THREE.BoxGeometry(.08, .18, 1.6), at: [sh.x - d * (SH.len + .27), y + 1.6, sh.z], color: dark });   // firing slit facing the enemy
+      for (let i = 0; i < 8; i++) P.push({ geo: lumpy(new THREE.DodecahedronGeometry(1, 0), .4), at: [sh.x + rand(-2.5, 2.5), y + 2.75, sh.z + rand(-1.6, 1.6)], scale: [.5, .25, .5], color: grass });   // turf on the roof
+    }
+  }
+  mergedMesh(P);
+})();
+
 let houseMesh;
 (function makeHouse() {
   const { x0, x1, z0, z1, floor, t } = HOUSE;
@@ -1350,8 +1398,9 @@ function blast(x, y, z, power) {     // an explosion at (x, y, z); power 1 = a g
   play("boom", x, z, { vol: 1.4 * power });
   const at = { x, z, y };
   // anyone close enough, and not behind a wall, gets hurt: less the further away they are
-  for (const v of [...enemies, ...players.filter(p => p.alive), ...allies]) {
+  for (const v of [...enemies, ...players.filter(p => p.alive && !p.flying), ...allies]) {
     const d = Math.hypot(v.x - g.x, v.z - g.z, ((v.y || 0) + .9) - g.y);
+    if (inShelter(v)) continue;
     if (d > R || !clearShot(at, v, g.y + .5, (v.y || 0) + 1)) continue;
     const hurt = GRENADE_DAMAGE * power * (1 - d / R) * (v.num ? .6 : 1);   // your own grenade hurts you less
     v.hp -= hurt; v.sinceHit = 0; v.lastHit = { blast: true, dx: v.x - g.x, dz: v.z - g.z };
@@ -1577,6 +1626,10 @@ function play(name, x, z, extra = {}) {
       tone(o, { len: .25, freq: 1900 + Math.random() * 600, type: "triangle", vol: .18 });
       noiseHit(o, { len: .05, type: "highpass", freq: 3000, vol: .3 });
       break;
+    case "rocket":                   // a rocket launching: a rushing whoosh
+      noiseHit(o, { len: .7, type: "bandpass", freq: 500, endFreq: 2600, q: 1, vol: .6, attack: .02 });
+      noiseHit(o, { len: .12, freq: 900, endFreq: 200, vol: .7 });
+      break;
     case "radio":                    // a burst of radio static: pssshk
       noiseHit(o, { len: .45, type: "bandpass", freq: 2200, q: .7, vol: .55, attack: .01 });
       for (let i = 0; i < 6; i++) noiseHit(o, { start: Math.random() * .4, len: .03, type: "highpass", freq: 3500, vol: .5 });
@@ -1753,7 +1806,7 @@ function tankFits(t, x, z, yaw) {    // can the tank be here without hitting a w
 const blockedByWall = (x, z) => walls.some(w => w.top > .5 && circleHitsRect(x, z, .2, w));
 
 function tankTargets(t) {            // the enemies of this tank: soldiers and tanks of the other side
-  const foes = t.side === "ally" ? [...enemies] : [...players.filter(p => p.alive), ...allies];
+  const foes = t.side === "ally" ? [...enemies] : [...players.filter(p => p.alive && !p.flying), ...allies];
   const camp = enemyCamp(t.side);
   return foes.concat(tanks.filter(o => !o.dead && o.side !== t.side), camp ? [camp] : []);
 }
@@ -2351,6 +2404,252 @@ function updateTents() {
 }
 const enemyCamp = side => tents.find(m => m.side !== side && !m.dead);   // the other side's tent, if still standing
 
+// ---------- PLANES: your Hawker Typhoon (press F beside it to fly) and the Germans' Focke-Wulf Fw 190 ----------
+// Built along +z (nose forwards), wings along x, laid out at real size next to the soldiers.
+const planeMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: .7, metalness: .2 });
+// Real 1944 paint schemes, chosen point by point from where the surface is and which way it faces:
+// RAF: wavy Dark Green and Ocean Grey on top, Medium Sea Grey underneath.
+// Luftwaffe: angular splinters of grey-green (RLM 74) and grey-violet (RLM 75) on top, pale blue (RLM 76)
+// underneath and on the sides, with soft mottling on the sides.
+function camoPaint(geo, scheme) {
+  const p = geo.attributes.position, n = geo.attributes.normal, c = geo.attributes.color, f = geo.attributes.fabric, col = new THREE.Color();
+  const raf = { green: 0x445638, grey: 0x7a8288, under: 0xa3a9ab }, luft = { a: 0x5b6457, b: 0x6f7178, under: 0xaebfcc };
+  for (let i = 0; i < p.count; i++) {
+    if (f.array[i] !== 9) continue;
+    const x = p.getX(i), y = p.getY(i), z = p.getZ(i), ny = n.getY(i), nx = Math.abs(n.getX(i));
+    if (scheme === "raf") {
+      if (ny < -.25) col.set(raf.under);
+      else col.set(Math.sin(x * .55 + Math.sin(z * .4) * 2.2) + Math.sin(z * .5 + x * .15) * .8 > .15 ? raf.green : raf.grey);
+    } else {
+      if (ny < -.25) col.set(luft.under);
+      else if (nx > .55 && ny < .5) {                // fuselage sides: pale blue, mottled with the two greys
+        col.set(luft.under);
+        const m = noise2(x * 2.2 + 9, z * 2.2 + y * 3);
+        if (z < 1.5 && m > .62) col.set(m > .74 ? luft.a : luft.b);
+      } else col.set((Math.floor(x * .55 + z * .35) + Math.floor(z * .5 - x * .3)) % 2 ? luft.a : luft.b);   // straight-edged splinters
+    }
+    col.toArray(c.array, i * 3);
+  }
+  return geo;
+}
+function typhoonGeometry() {
+  const P = [], skin = 0x4a5a3a, grey = 0x6f7470, glass = 0x7d93a3, dark = 0x2a2a28, white = 0xeeeeea, black = 0x141414;
+  const cam = (geo, at, rot) => P.push({ geo, at, rot, color: skin, fabric: 9 });
+  cam(new THREE.CylinderGeometry(.66, .24, 8, 16).rotateX(Math.PI / 2), [0, 0, -1]);          // fuselage
+  cam(new THREE.CylinderGeometry(.72, .7, 1.6, 16).rotateX(Math.PI / 2), [0, -.02, 3.6]);      // engine cowling
+  P.push({ geo: new THREE.ConeGeometry(.32, .7, 14).rotateX(Math.PI / 2), at: [0, 0, 4.75], color: 0xb9c4a8 });   // spinner, in Sky
+  P.push({ geo: new THREE.CylinderGeometry(.4, .4, .4, 14).rotateX(Math.PI / 2), at: [0, 0, -2.1], color: 0xb9c4a8 });   // Sky band round the rear fuselage
+  for (const s of [-1, 1]) for (const [r, c] of [[.58, 0xd8b23a], [.5, 0x1d2f5c], [.32, white], [.18, 0xa3222a]])   // fuselage roundels: yellow, blue, white, red
+    P.push({ geo: new THREE.CylinderGeometry(r, r, .02, 20).rotateZ(Math.PI / 2), at: [s * (.56 + (.58 - r) * .05), .05, -1.1], color: c });
+  cam(new THREE.BoxGeometry(.95, .62, 1.6), [0, -.68, 3.2]);                                  // the big chin radiator
+  P.push({ geo: new THREE.BoxGeometry(.75, .45, .05), at: [0, -.7, 4.02], color: dark });      // its intake
+  P.push({ geo: new THREE.SphereGeometry(1, 16, 10).scale(.42, .38, .95), at: [0, .62, .4], color: glass });   // bubble canopy
+  for (const s of [-1, 1]) {
+    cam(new THREE.BoxGeometry(6.1, .22, 2.4), [s * 3.35, -.38, .9], [0, 0, s * .06]);         // wings
+    P.push({ geo: new THREE.CylinderGeometry(.8, .8, .02, 20), at: [s * 4.6, -.18 + .2 * .06 * 4.6 * 0, .9], rot: [0, 0, s * .06], color: 0x1d2f5c });   // roundel: blue
+    P.push({ geo: new THREE.CylinderGeometry(.32, .32, .03, 16), at: [s * 4.6, -.17, .9], rot: [0, 0, s * .06], color: 0xa3222a });                     // and red
+    for (let k = 0; k < 5; k++)                                                                  // black and white invasion stripes (D-Day, 1944)
+      P.push({ geo: new THREE.BoxGeometry(.44, .24, 2.42), at: [s * (1.6 + k * .45), -.36 + s * .06 * (1.6 + k * .45) * .0, .9], rot: [0, 0, s * .06], color: k % 2 ? black : white });
+    for (let k = 0; k < 4; k++) {                                                                // four rockets on rails under each wing
+      P.push({ geo: new THREE.CylinderGeometry(.075, .075, 1.5, 8).rotateX(Math.PI / 2), at: [s * (3.4 + k * .45), -.68, 1.25], color: grey });
+      P.push({ geo: new THREE.ConeGeometry(.075, .25, 8).rotateX(Math.PI / 2), at: [s * (3.4 + k * .45), -.68, 2.1], color: 0x8a3a22 });
+    }
+  }
+  for (let k = 0; k < 5; k++) P.push({ geo: new THREE.CylinderGeometry(.36 - k * .02, .36 - k * .02, .3, 14).rotateX(Math.PI / 2), at: [0, 0, -2.6 - k * .3], color: k % 2 ? black : white });   // stripes round the tail
+  cam(new THREE.BoxGeometry(4.4, .12, 1.25), [0, .1, -4.6]);                                   // tailplane
+  cam(new THREE.BoxGeometry(.12, 1.7, 1.4), [0, .95, -4.75], [-.2, 0, 0]);                      // fin
+  for (const [z, c] of [[-4.45, 0xa3222a], [-4.75, white], [-5.05, 0x1d2f5c]]) P.push({ geo: new THREE.BoxGeometry(.14, .55, .3), at: [0, .85, z], color: c });   // fin flash
+  const gear = [];
+  for (const s of [-1, 1]) {
+    gear.push({ geo: new THREE.CylinderGeometry(.06, .06, 1.2, 8), at: [s * 2, -1, 1.1], color: dark });
+    gear.push({ geo: wheelGeo(.42, .22), at: [s * 2, -1.55, 1.2], color: 0x1b1a18 });
+  }
+  gear.push({ geo: wheelGeo(.16, .1), at: [0, -.42, -4.4], color: 0x1b1a18 });
+  return { body: camoPaint(mergeParts(P, .05, true), "raf"), gear: mergeParts(gear, .05, true), propZ: 4.85, sit: 1.97 };
+}
+function fw190Geometry() {
+  const P = [], a = 0x5d6461, b = 0x7b8580, dark = 0x2a2a28, glass = 0x7d93a3, white = 0xeeeeea, black = 0x111111, yellow = 0xc9a53a;
+  const cam = (geo, at, rot) => P.push({ geo, at, rot, color: a, fabric: 9 });
+  cam(new THREE.CylinderGeometry(.62, .22, 7.2, 16).rotateX(Math.PI / 2), [0, 0, -.9]);       // fuselage
+  cam(new THREE.CylinderGeometry(.8, .7, 1.3, 18).rotateX(Math.PI / 2), [0, 0, 3.2]);          // radial engine cowling
+  P.push({ geo: new THREE.CylinderGeometry(.82, .82, .12, 18).rotateX(Math.PI / 2), at: [0, 0, 3.86], color: dark });   // cowling ring
+  P.push({ geo: new THREE.CylinderGeometry(.66, .66, .3, 14).rotateX(Math.PI / 2), at: [0, 0, 2.45], color: yellow });   // yellow band
+  P.push({ geo: new THREE.ConeGeometry(.34, .7, 14).rotateX(Math.PI / 2), at: [0, 0, 4.25], color: dark });             // spinner
+  P.push({ geo: new THREE.SphereGeometry(1, 16, 10).scale(.4, .38, .9), at: [0, .6, .3], color: glass });              // canopy
+  for (const s of [-1, 1]) {
+    cam(new THREE.BoxGeometry(5, .2, 2.2), [s * 2.85, -.42, .7], [0, 0, s * .07]);             // wings
+    // the German cross on each wing and each side of the fuselage
+    P.push({ geo: new THREE.BoxGeometry(1.2, .03, .38), at: [s * 3.6, -.25, .7], color: white }); P.push({ geo: new THREE.BoxGeometry(.38, .03, 1.2), at: [s * 3.6, -.25, .7], color: white });
+    P.push({ geo: new THREE.BoxGeometry(1, .04, .2), at: [s * 3.6, -.24, .7], color: black }); P.push({ geo: new THREE.BoxGeometry(.2, .04, 1), at: [s * 3.6, -.24, .7], color: black });
+    P.push({ geo: new THREE.BoxGeometry(.03, .7, .2), at: [s * .43, .05, -2.3], color: white }); P.push({ geo: new THREE.BoxGeometry(.03, .2, .7), at: [s * .43, .05, -2.3], color: white });
+    P.push({ geo: new THREE.BoxGeometry(.04, .55, .1), at: [s * .44, .05, -2.3], color: black }); P.push({ geo: new THREE.BoxGeometry(.04, .1, .55), at: [s * .44, .05, -2.3], color: black });
+    P.push({ geo: new THREE.CylinderGeometry(.17, .17, 1.3, 10).rotateX(Math.PI / 2), at: [s * 2.4, -.78, .9], color: dark });   // rocket tubes under the wings
+  }
+  cam(new THREE.BoxGeometry(3.6, .12, 1.1), [0, .1, -4.1]);                                    // tailplane
+  cam(new THREE.BoxGeometry(.12, 1.5, 1.2), [0, .85, -4.25], [-.25, 0, 0]);                     // fin
+  return { body: camoPaint(mergeParts(P, .05, true), "luftwaffe"), gear: null, propZ: 4.3, sit: 1.97 };
+}
+function makePropeller() {
+  const g = new THREE.Group(), m = new THREE.MeshStandardMaterial({ color: 0x1d1d1b, roughness: .6 });
+  for (let i = 0; i < 3; i++) { const b = new THREE.Mesh(new THREE.BoxGeometry(.22, 1.9, .05).translate(0, .95, 0), m); b.rotation.z = i * Math.PI * 2 / 3; g.add(b); }
+  const disc = new THREE.Mesh(new THREE.CircleGeometry(1.95, 24), new THREE.MeshBasicMaterial({ color: 0x222222, transparent: true, opacity: .18, depthWrite: false, side: THREE.DoubleSide }));
+  g.add(disc); g.disc = disc;
+  return g;
+}
+let planes = [], rockets = [];
+const aimRing = new THREE.Mesh(new THREE.RingGeometry(1.6, 2, 32), new THREE.MeshBasicMaterial({ color: 0xff4030, transparent: true, opacity: .75, depthWrite: false, side: THREE.DoubleSide }));
+aimRing.rotation.x = -Math.PI / 2; aimRing.visible = false; scene.add(aimRing);
+function makePlane(side) {
+  const geo = side === "ally" ? typhoonGeometry() : fw190Geometry();
+  const group = new THREE.Group(); group.rotation.order = "YXZ";
+  const body = new THREE.Mesh(geo.body, planeMat); body.castShadow = true; group.add(body);
+  const prop = makePropeller(); prop.position.z = geo.propZ; group.add(prop);
+  let gear = null; if (geo.gear) { gear = new THREE.Mesh(geo.gear, planeMat); gear.castShadow = true; group.add(gear); }
+  scene.add(group);
+  return { plane: true, side, group, prop, gear, sit: geo.sit, x: 0, z: 0, alt: 0, yaw: 0, roll: 0, pitch: 0, pilot: null, parked: true, cool: 0, wing: 1, salvo: 0, attackCool: 0, loiter: 0, target: null };
+}
+function parkPlane(pl) {
+  pl.parked = true; pl.pilot = null; pl.x = PLANE_PARK[0]; pl.z = PLANE_PARK[1]; pl.yaw = Math.PI / 2; pl.roll = pl.pitch = 0;
+  pl.alt = groundY(pl.x, pl.z) + pl.sit; if (pl.gear) pl.gear.visible = true;
+}
+function setupPlanes() {
+  if (!planes.length) planes.push(makePlane("ally"), makePlane("enemy"));
+  for (const r of rockets) scene.remove(r.mesh);
+  rockets = [];
+  parkPlane(planes[0]);
+  const g = planes[1];                // the Fw 190 starts circling behind the German lines
+  g.parked = false; g.x = GERMAN_LINE_X + 40; g.z = 0; g.alt = 45; g.yaw = 0; g.attackCool = 60 * 20; g.salvo = 0;
+  for (const pl of planes) placePlane(pl);
+}
+function placePlane(pl) {
+  pl.group.position.set(pl.x, pl.alt, pl.z);
+  pl.group.rotation.set(-pl.pitch, pl.yaw, pl.roll);
+  pl.prop.rotation.z += pl.parked && !pl.pilot ? 0 : .9;
+  pl.prop.disc.visible = !pl.parked || !!pl.pilot;
+}
+const planeNear = p => planes.find(pl => pl.side === "ally" && pl.parked && !pl.pilot && Math.hypot(p.x - pl.x, p.z - pl.z) < 7);
+function boardPlane(p, pl) {
+  pl.pilot = p; pl.parked = false; p.flying = pl; p.crouched = false; p.planeArmed = false;
+  pl.alt = groundY(pl.x, pl.z) + 16; if (pl.gear) pl.gear.visible = false;   // takes straight off
+  play("rocket", pl.x, pl.z, { vol: .4 });
+}
+function leavePlane(p) {             // fly back and land at the airstrip; you climb out beside the plane
+  const pl = p.flying;
+  parkPlane(pl); placePlane(pl);
+  p.flying = null;
+  p.x = pl.x - 3; p.z = pl.z - 6; p.y = supportY(p.x, p.z, 99); p.vx = p.vz = p.vy = 0;
+}
+function rocketAim(pl) {             // where a rocket fired now would land: on the ground ahead, further when flying higher
+  const f = forward(pl.yaw), d = Math.max(26, (pl.alt - groundY(pl.x, pl.z)) * 1.15);
+  const x = pl.x + f.x * d, z = pl.z + f.z * d;
+  return { x, z, y: groundY(x, z) };
+}
+function fireRocket(pl) {
+  const rt = rightOf(pl.yaw), side = pl.wing = -pl.wing, aim = rocketAim(pl);
+  const from = new THREE.Vector3(pl.x + rt.x * side * 3.8, pl.alt - .7, pl.z + rt.z * side * 3.8);
+  const to = new THREE.Vector3(aim.x + rand(-1.2, 1.2), aim.y, aim.z + rand(-1.2, 1.2)), dir = to.clone().sub(from).normalize();
+  const mesh = new THREE.Mesh(new THREE.CylinderGeometry(.08, .08, 1.2, 8).rotateX(Math.PI / 2), new THREE.MeshStandardMaterial({ color: 0x6f7470 }));
+  mesh.position.copy(from); mesh.lookAt(to);
+  scene.add(mesh);
+  rockets.push({ x: from.x, y: from.y, z: from.z, d: dir, side: pl.side, mesh, life: 200 });
+  play("rocket", from.x, from.z);
+}
+function updateRockets() {
+  for (const r of rockets) {
+    for (let k = 0; k < 3 && r.life > 0; k++) {
+      r.x += r.d.x * ROCKET_SPEED / 3; r.y += r.d.y * ROCKET_SPEED / 3; r.z += r.d.z * ROCKET_SPEED / 3;
+      const g = groundY(r.x, r.z);
+      const hitSoldier = [...players.filter(p => p.alive && !p.flying), ...allies, ...enemies].some(v => Math.hypot(v.x - r.x, v.z - r.z) < .8 && r.y < (v.y || 0) + 2);
+      if (r.y <= g + .05 || hitSoldier || tankAt(r.x, r.z, r.y) || wallStopsShot(r.x, r.z, r.y) || --r.life <= 0) {
+        r.life = 0; blast(r.x, Math.max(r.y, g) + 1.2, r.z, ROCKET_POWER);   // bursts just above the ground, so it reaches down into trenches
+      }
+    }
+    r.mesh.position.set(r.x, r.y, r.z);
+    addPuff(r.x - r.d.x, r.y - r.d.y, r.z - r.d.z, 0xffa040, 4, 0, { alpha: .9, size: .25, glow: true });   // the rocket motor's flame
+    if (Math.random() < .7) addPuff(r.x - r.d.x * 1.5, r.y - r.d.y * 1.5, r.z - r.d.z * 1.5, 0xb8b4ac, rand(40, 70), .03, { alpha: .45, size: .35 });   // and its smoke trail
+    if (r.life <= 0) scene.remove(r.mesh);
+  }
+  rockets = rockets.filter(r => r.life > 0);
+}
+function steerPlane(pl, turn, climb) {
+  // keep inside the map: past the edge of the landscape the plane turns back towards the middle on its own
+  if (Math.abs(pl.x) > WORLD_X - 30 || Math.abs(pl.z) > WORLD_Z - 30) {
+    const home = Math.atan2(-pl.x, -pl.z), diff = Math.atan2(Math.sin(home - pl.yaw), Math.cos(home - pl.yaw));
+    turn = Math.sign(diff);
+  }
+  pl.yaw += turn * .025;
+  pl.roll += (-turn * .7 - pl.roll) * .08;
+  const ground = groundY(pl.x, pl.z), lo = ground + 12, hi = 85;
+  pl.alt = Math.max(lo, Math.min(hi, pl.alt + climb * .2));
+  if (pl.alt < lo + .1 && climb < 0) climb = 0;
+  pl.pitch += (climb * .22 - pl.pitch) * .08;
+  const f = forward(pl.yaw);
+  pl.x += f.x * PLANE_SPEED; pl.z += f.z * PLANE_SPEED;
+  if (--pl.cool < 0) pl.cool = 0;
+}
+// your Typhoon: W/S climb and dive, A/D (or the arrows) turn, F or Space to fire rockets, X to land
+function flyPlane(p, climb, turn, fire, leave) {
+  const pl = p.flying;
+  if (leave) { leavePlane(p); return; }
+  steerPlane(pl, Math.max(-1, Math.min(1, turn)), climb);
+  if (fire && pl.cool <= 0) { fireRocket(pl); pl.cool = ROCKET_GAP; }
+  p.x = pl.x; p.z = pl.z; p.y = groundY(pl.x, pl.z); p.yaw = pl.yaw; p.vx = p.vz = 0;
+  placePlane(pl);
+}
+// the Fw 190: circles behind its lines, then dives in on an attack run (your medic tent first) and fires a salvo of rockets
+function flyGermanPlane(pl) {
+  let tx, tz, climb;
+  if (pl.attackCool > 0) {
+    pl.attackCool--;
+    pl.loiter += .006;
+    tx = GERMAN_LINE_X + 45 + Math.cos(pl.loiter) * 45; tz = Math.sin(pl.loiter) * 60;
+    climb = pl.alt < 45 ? 1 : 0;
+    if (pl.attackCool === 0) {
+      const camp = enemyCamp("enemy");
+      const foes = [...players.filter(p => p.alive && !p.flying), ...allies, ...tanks.filter(t => t.side === "ally" && !t.dead)];
+      pl.target = camp || (foes.length ? pick(foes) : null);
+      if (!pl.target) pl.attackCool = 60 * 10; else radio(pick(["Enemy aircraft inbound! Take cover!", "Jerry plane coming in low! Get your heads down!", "Bandit overhead! Look out!"]));
+    }
+  } else {
+    const t = pl.target;
+    if (!t || (t.dead) || (t.alive === false)) { pl.attackCool = 60 * 10; return placePlane(pl); }
+    tx = t.x; tz = t.z;
+    climb = pl.alt > groundY(t.x, t.z) + 30 ? -1 : 0;
+    const aim = rocketAim(pl), off = Math.hypot(aim.x - t.x, aim.z - t.z);
+    const want = Math.atan2(t.x - pl.x, t.z - pl.z), diff = Math.atan2(Math.sin(want - pl.yaw), Math.cos(want - pl.yaw));
+    if (off < 9 && Math.abs(diff) < .2 && pl.salvo === 0) pl.salvo = 4;
+    if (pl.salvo > 0 && pl.cool <= 0) { fireRocket(pl); pl.cool = 10; if (--pl.salvo === 0) pl.attackCool = PLANE_ATTACK_GAP; }
+    if (Math.hypot(t.x - pl.x, t.z - pl.z) < 14 && pl.salvo === 0) pl.attackCool = PLANE_ATTACK_GAP;   // overshot: go round again later
+  }
+  const want = Math.atan2(tx - pl.x, tz - pl.z), diff = Math.atan2(Math.sin(want - pl.yaw), Math.cos(want - pl.yaw));
+  steerPlane(pl, Math.max(-1, Math.min(1, diff * 2)), climb);
+  placePlane(pl);
+}
+function updatePlanes() {
+  for (const pl of planes) {
+    if (pl.side === "enemy") flyGermanPlane(pl);
+    else if (!pl.pilot) placePlane(pl);
+  }
+  updateRockets();
+  const flyer = players.find(p => p.flying);
+  aimRing.visible = !!flyer;
+  if (flyer) { const a = rocketAim(flyer.flying); aimRing.position.set(a.x, a.y + .15, a.z); }
+  planeSound();
+}
+let planeEngine = null;
+function planeSound() {              // a deep droning engine, loudest for the nearest plane in the air
+  if (!sound.ctx || sound.muted) return;
+  if (!planeEngine) {
+    const ctx = sound.ctx, o1 = ctx.createOscillator(), o2 = ctx.createOscillator(), lp = ctx.createBiquadFilter(), g = ctx.createGain();
+    o1.type = "sawtooth"; o2.type = "sawtooth"; o1.frequency.value = 72; o2.frequency.value = 75; lp.type = "lowpass"; lp.frequency.value = 500; g.gain.value = 0;
+    o1.connect(lp); o2.connect(lp); lp.connect(g); g.connect(sound.master); o1.start(); o2.start();
+    planeEngine = { g };
+  }
+  let loud = 0;
+  for (const pl of planes) if (!pl.parked) loud = Math.max(loud, pl.pilot && pl.pilot.num ? .9 : hearing(pl.x, pl.z).vol * 2.2);
+  planeEngine.g.gain.setTargetAtTime(Math.min(1, loud) * .12, sound.ctx.currentTime, .15);
+}
+
 // ---------- 4) THE SOLDIERS ----------
 // Three armies of 1944, each with its own uniform, helmet, kit and rifle.
 const KITS = {
@@ -2850,6 +3149,7 @@ function startGame(n) {
   if (twoPlayer) players.push(makePlayer(2));
   wave = 0; score = 0; paused = false; funds = 0;
   restoreTents();
+  setupPlanes();
   if (marketOpen) closeMarket();
   for (const p of players) equipGun(p, p.num === 2 ? "garand" : "enfield");
   for (let i = 0; i < ALLIES; i++) allies.push(makeAlly());
@@ -3011,6 +3311,15 @@ function updatePlayer(p) {
     turn = (keys.ArrowLeft ? 1 : 0) - (keys.ArrowRight ? 1 : 0);
   }
   const rideKey = p.num === 1 ? keys.KeyF : keys.Semicolon;
+  if (p.flying) {
+    if (!rideKey) p.planeArmed = true;                 // the F press that got you in doesn't also fire
+    const fireKeys = p.num === 1 ? (keys.Space || (!twoPlayer && mouse.down)) : keys.Enter;
+    flyPlane(p, fwd, turn - (twoPlayer ? 0 : side), (rideKey && p.planeArmed) || fireKeys, p.num === 1 ? keys.KeyO : keys.Backslash);
+    p.rideHeld = rideKey;
+    p.sinceHit++; if (p.sinceHit > REGEN_DELAY && p.hp < MAX_HP) p.hp = Math.min(MAX_HP, p.hp + REGEN_RATE);
+    return;
+  }
+  if (rideKey && !p.rideHeld && !p.riding) { const pl = planeNear(p); if (pl) { boardPlane(p, pl); p.rideHeld = true; return; } }
   if (rideKey && !p.rideHeld) {
     if (p.riding) getOff(p);
     else { const k = freeKradNear(p); if (k) { p.riding = k; k.rider = p; p.crouched = false; p.shownSlot = undefined; play("bolt", k.x, k.z, { vol: .5 }); } }
@@ -3079,11 +3388,34 @@ function updatePlayer(p) {
 }
 
 function canSee(s, t) {
+  if (inShelter(t)) { s.seeTarget = null; return s.sees = false; }
   if (Math.hypot(t.x - s.x, t.z - s.z) > 70) { s.seeTarget = null; return s.sees = false; }
   if (s.seeTarget !== t || --s.seeTimer <= 0) { s.seeTarget = t; s.sees = clearShot(s, t) && !smokeBlocks(s, t); s.seeTimer = 8 + Math.floor(Math.random() * 6); }
   return s.sees;
 }
 function updateAlly(a) {
+  const raid = planes[1] && !planes[1].parked && planes[1].attackCool === 0;
+  if (raid) {
+    let best = null, bd = 30;
+    for (const sh of shelters) if (sh.side === "ally") {
+      const d = Math.hypot(a.x - sh.x, a.z - sh.z), inside = allies.filter(o => o !== a && Math.hypot(o.x - sh.x, o.z - sh.z) < 2.2).length;
+      if (d < bd && inside < 4) { bd = d; best = sh; }
+    }
+    if (best) {                      // run in through the doorway
+      // the way in: round the side of the shelter to the doorway, then inside
+      const ahead = (a.x - best.x) * best.dir, sz = Math.sign(a.z - best.z) || 1, out = SH.half + 1.7;
+      let goal;
+      if (inShelter(a) || (ahead > 0 && Math.abs(a.z - best.z) < .7)) goal = best;                         // in the doorway lane: straight in
+      else if (ahead > SH.len + .6) goal = { x: best.x + best.dir * (SH.len + 1.6), z: best.z };             // in front: line up with the doorway first
+      else if (ahead < -SH.len && Math.abs(a.z - best.z) < out - .3) goal = { x: best.x - best.dir * (SH.len + 1.6), z: best.z + sz * out };   // behind it: step out to the side first
+      else goal = { x: best.x + best.dir * (SH.len + 1.6), z: best.z + sz * out };                             // along the side to the door end
+      const dx = goal.x - a.x, dz = goal.z - a.z, dd = Math.hypot(dx, dz);
+      a.yaw = Math.atan2(dx, dz); a.crouched = false;
+      if (dd > .4) steer(a, dx / dd * SPRINT_SPEED * .8, dz / dd * SPRINT_SPEED * .8, AGILITY * .6); else steer(a, 0, 0, AGILITY);
+      stepHeight(a, false);
+      return;
+    }
+  }
   if (a.flash > 0 && --a.flash === 0) a.uni.emissive.setHex(0);
   const lead = players.find(p => p.alive) || players[0];
   let t = null, d = 1e9;
@@ -3188,7 +3520,7 @@ function radio(text) {               // static, the commander shouting, static a
 }
 function updateEnemy(e) {
   if (e.flash > 0 && --e.flash === 0) e.uni.emissive.setHex(0);
-  const targets = [...players.filter(p => p.alive), ...allies];
+  const targets = [...players.filter(p => p.alive && !p.flying), ...allies];
   if (!targets.length) return;
   let t = targets.reduce((a, b) => dist(e, a) < dist(e, b) ? a : b);
   const camp = enemyCamp("enemy");                    // the British medic tent comes first (unless someone is right on top of them)
@@ -3224,6 +3556,7 @@ function update() {
   allies.forEach(updateAlly);
   updateTanks();
   updateTents();
+  updatePlanes();
   const lead = players.find(p => p.alive);           // the commander nags if you hang back from the German line
   if (lead && --radioTimer <= 0) { radioTimer = 60 * rand(45, 70); if (lead.x < GERMAN_LINE_X - 25) radio(pick(RADIO.push)); }
   updateKrads();
@@ -3250,11 +3583,11 @@ function update() {
       b.life = 0; m.hp -= b.dmg ?? (b.team === "ally" ? 20 : 12);
       addPuff(b.x, b.y, b.z, 0xd9d3bf, 8, .04, { alpha: .6, size: .3 });
     }
-    const victims = b.team === "ally" ? enemies : [...players.filter(p => p.alive), ...allies];
+    const victims = b.team === "ally" ? enemies : [...players.filter(p => p.alive && !p.flying), ...allies];
     if (b.team === "enemy" && b.life > 0 && !b.whizzed) for (const p of players)   // a near miss whizzes past your ear
       if (p.alive && dist(b, p) < 1.8 && dist(b, p) > .6) { b.whizzed = true; play("whiz", b.x, b.z); }
     for (const v of victims) {
-      if (b.life > 0 && dist(b, v) < .6 && b.y > (v.y || 0) - .2 && b.y < (v.y || 0) + 2.3) {
+      if (b.life > 0 && !inShelter(v) && dist(b, v) < .6 && b.y > (v.y || 0) - .2 && b.y < (v.y || 0) + 2.3) {
         b.life = 0;
         play("hit", v.x, v.z);
         v.hp -= b.dmg ?? (b.team === "ally" ? 20 : 12);
@@ -3530,6 +3863,14 @@ function animateSoldier(s, down) {   // runs once per game step, so it looks the
 }
 const camRay = new THREE.Raycaster(), camHead = new THREE.Vector3(), camWant = new THREE.Vector3(), camLook = new THREE.Vector3();
 function placeCamera(p) {
+  if (p.flying) {
+    const pl = p.flying, f = forward(pl.yaw);
+    p.cam.position.set(pl.x - f.x * 15, pl.alt + 5.5, pl.z - f.z * 15);
+    p.cam.lookAt(pl.x + f.x * 25, pl.alt - 6, pl.z + f.z * 25);
+    p.cam.fov = 70; p.camClose = false; p.camY = groundY(p.x, p.z);
+    return;
+  }
+  p.cam.fov = 65;
   const f = forward(p.yaw), r = rightOf(p.yaw);
   const floorY = (p.y ?? groundY(p.x, p.z)) - (p.jumpY || 0);
   const want = floorY + (p.jumpY || 0) * .15 - (p.crouchAmt || 0) * .55;   // follow the floor; barely rise with a jump; drop with a crouch
@@ -3576,9 +3917,9 @@ function render() {
     const vw = w / n;
     p.cam.aspect = vw / h; p.cam.updateProjectionMatrix();
     renderer.setViewport(i * vw, 0, vw, h); renderer.setScissor(i * vw, 0, vw, h);
-    p.group.visible = !p.camClose;                    // never look out from inside your own body
+    p.group.visible = !p.camClose && !p.flying;                    // never look out from inside your own body
     renderer.render(scene, p.cam);
-    p.group.visible = true;
+    p.group.visible = !p.flying;
   });
 }
 
@@ -3593,7 +3934,7 @@ function updateHUD() {
     document.getElementById("hptext" + p.num).textContent = `${Math.ceil(p.hp)} / ${MAX_HP}`;
     updateHotbar(p);
     const pr = document.getElementById("prompt" + p.num), key = p.num === 1 ? "F" : ";";
-    pr.textContent = p.inMedic ? "MEDIC TENT – the medic has patched you up" : p.riding ? key + " – get off the Kettenkrad · W/S speed, A/D steer" : p.alive && freeKradNear(p) ? key + " – ride the Kettenkrad" : "";
+    pr.textContent = !p.flying && p.alive && inShelter(p) ? "BOMB SHELTER – safe from bombs and bullets" : p.flying ? key + " or " + (p.num === 1 ? "Space" : "Enter") + " – fire rockets · W/S climb / dive · A/D turn · " + (p.num === 1 ? "O" : "\\") + " – get out" : p.alive && !p.riding && planeNear(p) ? key + " – fly the Typhoon" : p.inMedic ? "MEDIC TENT – the medic has patched you up" : p.riding ? key + " – get off the Kettenkrad · W/S speed, A/D steer" : p.alive && freeKradNear(p) ? key + " – ride the Kettenkrad" : "";
     pr.hidden = !pr.textContent;
     p.hurtFlash = (p.hurtFlash || 0) * .93;               // red flash when hit, and a faint glow while health is low
     const low = p.alive ? clamp01((.35 - p.hp / MAX_HP) / .35) * .45 : .6;
@@ -3628,7 +3969,7 @@ function loop(now) {
 requestAnimationFrame(loop);
 
 // ---------- 7) CONTROLS ----------
-const gameKeys = ["Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Enter", "Slash", "Quote", "Semicolon"];
+const gameKeys = ["Backslash", "Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Enter", "Slash", "Quote", "Semicolon"];
 let wheelSteps = 0;                // mouse wheel turns since the last game step (changes soldier 1's item)
 window.addEventListener("wheel", e => {
   if (state !== "play") return;
@@ -3658,7 +3999,7 @@ stage.addEventListener("mousedown", e => {
 });
 window.addEventListener("mouseup", () => { mouse.down = false; });
 document.addEventListener("mousemove", e => {
-  if (document.pointerLockElement === canvas && players[0] && !paused && !players[0].riding) players[0].yaw -= e.movementX * MOUSE_SENSITIVITY;
+  if (document.pointerLockElement === canvas && players[0] && !paused && !players[0].riding && !players[0].flying) players[0].yaw -= e.movementX * MOUSE_SENSITIVITY;
 });
 
 document.getElementById("btn1").onclick = () => { startSound(); startGame(1); };

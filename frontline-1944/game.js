@@ -7,7 +7,7 @@
 //            5 game rules · 6 drawing · 7 controls
 // ============================================================
 
-const BUILD = 53;             // shown on screen, so you can tell the browser loaded the newest version
+const BUILD = 58;             // shown on screen, so you can tell the browser loaded the newest version
 document.querySelector(".tag").textContent += " · build " + BUILD;
 
 // ---------- 1) SETTINGS: change these to tweak the game ----------
@@ -57,6 +57,9 @@ const PLANE_ATTACK_GAP = 60 * 32;   // how often the German plane makes an attac
 const PLANE_PARK = [-48, -26]; // where your plane waits on its airstrip
 const TENT_HP = 500;          // how much it takes to destroy a medic tent
 const BRITISH_TENT = [-40, 14]; // where your medic tent stands
+const AT_SQUAD = 3;           // anti-tank gunners on each side (topped up every wave)
+const AT_RANGE = 55;          // how far away they open fire
+const AT_TANK_DAMAGE = 6;     // damage each of their bullets does to a tank (an ordinary bullet does 1)
 const ATTACK_SHARE = 0.5;     // share of Germans who climb out of their trench and come for you (the rest hold it)
 const POST_GAP = 2.4;         // space between German riflemen along their trench
 const MIDLINE_X = 43;         // the white line across the middle of the field
@@ -2239,6 +2242,15 @@ function gunGeometry(id) {           // each gun is laid along +z: butt at z = 0
     box(.035, .02, .26, [0, .035, .86], worn);                            // heat shield over the barrel
     box(.012, .025, .04, [0, -.02, .97], steel);                          // bayonet lug
     P.push({ geo: new THREE.TorusGeometry(.028, .005, 4, 10, Math.PI), at: [0, -.045, .41], rot: [0, Math.PI / 2, Math.PI], color: steel });
+  } else if (id === "mg42") {           // German MG 42: steel stock, square receiver, holed barrel jacket, bipod, ammunition belt
+    P.push({ geo: sideProfile([[0, .02], [.22, .01], [.3, 0], [.3, -.05], [.2, -.06], [0, -.13]], .045), at: [0, 0, 0], color: 0x2a2621 });
+    box(.03, .1, .04, [0, -.075, .36], 0x2a2621, [-.25, 0, 0]);
+    box(.055, .075, .3, [0, -.002, .46], worn);
+    for (let i = 0; i < 8; i++) tube(.023, .62 + i * .055, .62 + i * .055 + .035, 0, i % 2 ? dark : steel);   // the cooling holes in the jacket
+    tube(.012, .6, 1.12, 0, steel);
+    P.push({ geo: new THREE.CylinderGeometry(.02, .026, .06, 10).rotateX(Math.PI / 2), at: [0, 0, 1.14], color: steel });   // muzzle booster
+    box(.08, .02, .14, [-.06, -.02, .45], 0xb08a3a);                       // the brass belt of cartridges hanging off the side
+    for (const s of [-1, 1]) P.push({ geo: new THREE.CylinderGeometry(.007, .007, .28, 6), at: [s * .03, -.04, .9], rot: [Math.PI / 2 - .25, 0, s * .1], color: steel });
   } else if (id === "bren") {
     P.push({ geo: sideProfile([[0, .03], [.2, .01], [.3, 0], [.3, -.05], [.2, -.06], [0, -.14]], .05), at: [0, 0, 0], color: worn });   // steel butt
     box(.03, .1, .04, [0, -.075, .36], wood, [-.25, 0, 0]);               // pistol grip
@@ -2497,7 +2509,8 @@ function makePropeller() {
   return g;
 }
 let planes = [], rockets = [];
-const aimRing = new THREE.Mesh(new THREE.RingGeometry(1.6, 2, 32), new THREE.MeshBasicMaterial({ color: 0xff4030, transparent: true, opacity: .75, depthWrite: false, side: THREE.DoubleSide }));
+const aimRing = new THREE.Mesh(new THREE.RingGeometry(1.6, 2, 32), new THREE.MeshBasicMaterial({ color: 0xff4030, transparent: true, opacity: .8, depthWrite: false, depthTest: false, side: THREE.DoubleSide }));
+aimRing.renderOrder = 20;              // drawn on top, so the cockpit never hides it
 aimRing.rotation.x = -Math.PI / 2; aimRing.visible = false; scene.add(aimRing);
 function makePlane(side) {
   const geo = side === "ally" ? typhoonGeometry() : fw190Geometry();
@@ -2520,6 +2533,53 @@ function setupPlanes() {
   const g = planes[1];                // the Fw 190 starts circling behind the German lines
   g.parked = false; g.x = GERMAN_LINE_X + 40; g.z = 0; g.alt = 45; g.yaw = 0; g.attackCool = 60 * 20; g.salvo = 0;
   for (const pl of planes) placePlane(pl);
+}
+// The Typhoon's cockpit, seen from the pilot's seat. It is fixed to the player's camera, so it moves with the view.
+// (Camera space: -z is straight ahead, +y is up.)
+function makeCockpit() {
+  const g = new THREE.Group();
+  const paint = new THREE.MeshStandardMaterial({ color: 0x445638, roughness: .75 });
+  const black = new THREE.MeshStandardMaterial({ color: 0x1c1c1a, roughness: .6 });
+  const frame = new THREE.MeshStandardMaterial({ color: 0x2c3326, roughness: .7, metalness: .2 });
+  const dial = new THREE.MeshStandardMaterial({ color: 0xe2ddca, roughness: .5, emissive: 0x202018 });
+  const add = (geo, mat, x, y, z, rx = 0, ry = 0, rz = 0) => { const m = new THREE.Mesh(geo, mat); m.position.set(x, y, z); m.rotation.set(rx, ry, rz); g.add(m); return m; };
+  const bar = (a, b, r, mat) => {                      // a frame tube from point a to point b
+    const A = new THREE.Vector3(...a), B = new THREE.Vector3(...b);
+    const m = add(new THREE.CylinderGeometry(r, r, A.distanceTo(B), 8), mat, 0, 0, 0);
+    m.position.copy(A).add(B).multiplyScalar(.5);
+    m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), B.clone().sub(A).normalize());
+  };
+  // the long engine cowling stretching out in front, and the spinning propeller
+  add(new THREE.CylinderGeometry(.72, .78, 3.6, 20).rotateX(Math.PI / 2), paint, 0, -1.3, -2.5);
+  for (const s of [-1, 1]) for (let i = 0; i < 4; i++) add(new THREE.BoxGeometry(.08, .1, .22), black, s * .62, -.84, -1.5 - i * .5, 0, 0, s * -.5);   // exhaust stubs
+  const spinner = add(new THREE.ConeGeometry(.32, .7, 14).rotateX(-Math.PI / 2), new THREE.MeshStandardMaterial({ color: 0xb9c4a8 }), 0, -1.3, -4.6);
+  const disc = add(new THREE.CircleGeometry(2.1, 32), new THREE.MeshBasicMaterial({ color: 0x1a1a18, transparent: true, opacity: .2, depthWrite: false, side: THREE.DoubleSide }), 0, -1.3, -4.45);
+  const blades = new THREE.Group(); blades.position.set(0, -1.3, -4.42); g.add(blades);
+  for (let i = 0; i < 3; i++) { const b = new THREE.Mesh(new THREE.BoxGeometry(.18, 2, .03).translate(0, 1, 0), new THREE.MeshBasicMaterial({ color: 0x111111, transparent: true, opacity: .45, depthWrite: false })); b.rotation.z = i * 2.09; blades.add(b); }
+  // the coaming and instrument panel below the windscreen, with dials
+  add(new THREE.BoxGeometry(1.4, .07, .3), paint, 0, -.27, -.82);
+  add(new THREE.BoxGeometry(1.36, .36, .06), black, 0, -.47, -.72);
+  for (const [x, y] of [[-.42, -.4], [-.26, -.4], [-.42, -.54], [-.26, -.54], [.26, -.4], [.42, -.4], [.26, -.54], [.42, -.54], [0, -.52]]) {
+    add(new THREE.CylinderGeometry(.055, .055, .015, 18).rotateX(Math.PI / 2), dial, x, y, -.69);
+    add(new THREE.BoxGeometry(.005, .045, .004), black, x, y + .01, -.68, 0, 0, Math.random() * 6.3);   // the needle
+  }
+  // the reflector gunsight in the middle of the coaming
+  add(new THREE.BoxGeometry(.09, .1, .09), black, 0, -.2, -.85);
+  add(new THREE.PlaneGeometry(.15, .12), new THREE.MeshBasicMaterial({ color: 0xa8c4c8, transparent: true, opacity: .25, depthWrite: false, side: THREE.DoubleSide }), 0, -.09, -.86, -.25);
+  add(new THREE.RingGeometry(.022, .027, 24), new THREE.MeshBasicMaterial({ color: 0xff7a30, transparent: true, opacity: .85, depthWrite: false }), 0, -.09, -.855, -.25);
+  // the windscreen and canopy frame
+  for (const s of [-1, 1]) {
+    bar([s * .3, -.24, -.86], [s * .2, .36, -.72], .018, frame);       // windscreen pillars
+    bar([s * .2, .36, -.72], [s * .5, .4, -.2], .016, frame);          // canopy rails over your head
+    bar([s * .3, -.24, -.86], [s * .62, -.2, -.1], .02, frame);        // the cockpit sill on each side
+  }
+  bar([-.2, .36, -.72], [.2, .36, -.72], .016, frame);                  // top of the windscreen
+  bar([-.28, -.2, -.86], [.28, -.2, -.86], .014, frame);                // bottom of the windscreen
+  g.spin = () => { blades.rotation.z += .6; };
+  g.position.set(0, -.24, .06);                       // sit low, so most of the view is out through the windscreen
+  g.visible = false;
+  for (const m of g.children) m.renderOrder = 10;
+  return g;
 }
 function placePlane(pl) {
   pl.group.position.set(pl.x, pl.alt, pl.z);
@@ -3075,11 +3135,13 @@ function updateHealthBar(p) {
 
 function makePlayer(num) {
   const s = buildSoldier(num === 1 ? "british" : "american");
-  return {
+  const p = {
     num, x: num === 1 ? -10 : 10, z: 0, y: groundY(num === 1 ? -10 : 10, 0), yaw: 0, r: .5, hp: MAX_HP, ammo: MAG_SIZE, reload: 0, gun: "enfield", owned: new Set(num === 2 ? ["enfield", "garand"] : ["enfield"]), cool: 0,
     alive: true, inv: newInventory(), slot: 0, bandaging: 0, shake: 0, vx: 0, vz: 0, jumpY: 0, vy: 0, land: 0, sinceHit: 0, healing: false, crouched: false, crouchAmt: 0, walk: 0, gait: 0, kick: 0, ...s, bar: makeHealthBar(s.group),
     cam: new THREE.PerspectiveCamera(65, 1, .1, 330),
   };
+  p.cockpit = makeCockpit(); p.cam.add(p.cockpit); scene.add(p.cam);   // the cockpit rides along with the camera
+  return p;
 }
 function makeAlly() {
   const lead = players[0], s = buildSoldier("british");
@@ -3123,6 +3185,7 @@ const enemyTracer = new THREE.MeshBasicMaterial({ color: 0xff9a3c });
 const puffGeo = new THREE.SphereGeometry(.3, 8, 6);
 
 function clearWorld() {
+  for (const p of players) scene.remove(p.cam);
   for (const o of [...players, ...allies, ...enemies, ...fallen]) { scene.remove(o.group); if (o.rifle && o.rifle.parent === scene) scene.remove(o.rifle); }
   for (const b of bullets) scene.remove(b.mesh);
   for (const p of puffs) scene.remove(p.mesh);
@@ -3176,7 +3239,9 @@ function nextWave() {
   if (players.length) while (spawnQueue > 0 && spawnDefender()) spawnQueue--;     // the trench line is manned when the wave begins
   radioTimer = 60 * 50;
   setTimeout(() => radio(wave > 1 ? pick(RADIO.won) + " " + pick(RADIO.start) : pick(RADIO.start)), 1500);
-  while (players.length && allies.length < ALLIES) allies.push(makeAlly());   // reinforcements replace the fallen
+  while (players.length && allies.filter(a => !a.at).length < ALLIES) allies.push(makeAlly());   // reinforcements replace the fallen
+  while (players.length && allies.filter(a => a.at).length < AT_SQUAD) allies.push(makeAtGunner());
+  if (players.length) for (let i = enemies.filter(e => e.at).length; i < AT_SQUAD; i++) spawnGermanAt();
   if (players.length) { tankWave(); kradWave(); }
   spawnTimer = 0;
   waveTimer = 120;
@@ -3282,7 +3347,7 @@ function shoot(from, yaw, team, spread, target, opt = {}) {
   const mesh = new THREE.Mesh(bulletGeo, team === "ally" ? allyTracer : enemyTracer);
   mesh.rotation.order = "YXZ"; mesh.rotation.set(-Math.atan2(h1 - h0, reach), a, 0); scene.add(mesh);
   bullets.push({ x: from.x + f.x * 1.2, z: from.z + f.z * 1.2, y: h0, h0, h1, reach, trav: 1.2, lift,
-    vx: f.x * BULLET_SPEED, vz: f.z * BULLET_SPEED, team, life: Math.ceil(((opt.range || 45) + 20) / BULLET_SPEED), mesh, dmg: opt.dmg });
+    vx: f.x * BULLET_SPEED, vz: f.z * BULLET_SPEED, team, life: Math.ceil(((opt.range || 45) + 20) / BULLET_SPEED), mesh, dmg: opt.dmg, at: opt.at });
   mesh.position.set(from.x + f.x * 1.2, h0, from.z + f.z * 1.2);
   if (opt.silent) return;
   from.group.position.set(from.x, from.y || 0, from.z); from.group.rotation.y = from.yaw;   // bring the model up to date
@@ -3393,6 +3458,35 @@ function canSee(s, t) {
   if (s.seeTarget !== t || --s.seeTimer <= 0) { s.seeTarget = t; s.sees = clearShot(s, t) && !smokeBlocks(s, t); s.seeTimer = 8 + Math.floor(Math.random() * 6); }
   return s.sees;
 }
+// anti-tank gunners: they go after the other side's tanks and fire long bursts that chew through armour
+function nearestEnemyTank(s, side) {
+  let best = null, bd = 140;
+  for (const t of tanks) if (!t.dead && t.side !== side) { const d = dist(s, t); if (d < bd) { bd = d; best = t; } }
+  return best;
+}
+function atFire(s, t, d, diff, sees, team) {
+  if (s.burst > 0) {
+    if (--s.burstGap <= 0) { shoot(s, s.yaw, team, .035 + d * .002, t, { dmg: 16, range: AT_RANGE, sound: "mg", at: true }); s.burstGap = 6; s.burst--; }
+    return;
+  }
+  if (--s.cool <= 0 && t && sees && d < AT_RANGE && Math.abs(diff) < .25 && !smokeBlocks(s, t)) { s.burst = 8; s.burstGap = 0; s.cool = rand(60, 110); }
+}
+function armGunner(s, gun) {         // swap the rifle for a machine gun
+  s.at = true; s.rifle.geometry = gunGeometry(gun);
+  s.muzzle.position.z = .02 + (gun === "bren" ? GUNS.bren.len : 1.14);
+  return s;
+}
+function makeAtGunner() { return armGunner(makeAlly(), "bren"); }
+function spawnGermanAt() {           // the German squad starts in front of their trench line
+  const e = makeEnemy();
+  for (let tries = 0; tries < 30; tries++) {
+    const x = GERMAN_LINE_X - rand(6, 12), z = rand(-60, 60);
+    if (!blocked(x, z, .6) && trenchAt(x, z).d > TRENCH.half + .5) { e.x = x; e.z = z; break; }
+  }
+  e.y = groundY(e.x, e.z); e.yaw = -Math.PI / 2; e.charging = true; e.cool = rand(30, 90);
+  e.group.position.set(e.x, e.y, e.z);
+  enemies.push(armGunner(e, "mg42"));
+}
 function updateAlly(a) {
   const raid = planes[1] && !planes[1].parked && planes[1].attackCool === 0;
   if (raid) {
@@ -3422,8 +3516,9 @@ function updateAlly(a) {
   for (const e of enemies) { const de = dist(a, e); if (de < d) { d = de; t = e; } }
   const camp = enemyCamp("ally");
   if (camp && dist(a, camp) < d) { d = dist(a, camp); t = camp; }
+  if (a.at) { const tk = nearestEnemyTank(a, "ally"); if (tk) { t = tk; d = dist(a, tk); } }   // gunners hunt tanks first
   const homeX = lead.x + a.post.dx * .7, homeZ = lead.z + a.post.dz * .7, fromHome = Math.hypot(a.x - homeX, a.z - homeZ);
-  const goHome = !t || (fromHome > 30 && d > 20);    // no enemy about, or wandered too far: fall back towards you
+  const goHome = !t || (fromHome > 30 && d > 20 && !(a.at && t.tank));   // gunners hunting a tank keep after it    // no enemy about, or wandered too far: fall back towards you
   const tx = goHome ? homeX : t.x, tz = goHome ? homeZ : t.z;
   const want = Math.atan2(tx - a.x, tz - a.z);
   const diff = Math.atan2(Math.sin(want - a.yaw), Math.cos(want - a.yaw));
@@ -3433,7 +3528,7 @@ function updateAlly(a) {
     const f = forward(a.yaw), go = fromHome > 3 ? ENEMY_SPEED * (fromHome > 12 ? 1.3 : 1) : 0;
     steer(a, f.x * go, f.z * go, AGILITY * .6);
   } else if (a.pause > 0) { a.pause--; steer(a, 0, 0, AGILITY * .6); }
-  else if (d > 22 || !sees) {
+  else if (d > (a.at && t && t.tank ? 40 : 22) || !sees) {
     const f = forward(a.yaw); steer(a, f.x * ENEMY_SPEED, f.z * ENEMY_SPEED, AGILITY * .6);
   } else {
     const r = rightOf(a.yaw); steer(a, r.x * a.strafe * .06, r.z * a.strafe * .06, AGILITY * .6);
@@ -3442,6 +3537,7 @@ function updateAlly(a) {
   }
   a.crouched = !goHome && sees && a.pause > 0;          // kneel down to take aim
   stepHeight(a, false);
+  if (a.at) { if (t && !goHome) atFire(a, t, d, diff, sees, "ally"); return; }
   if (--a.cool <= 0 && t && sees && d < 36 && Math.abs(diff) < .3 && !smokeBlocks(a, t)) {
     shoot(a, a.yaw, "ally", .03 + d * .004, t);
     a.cool = rand(60, 110);
@@ -3525,6 +3621,7 @@ function updateEnemy(e) {
   let t = targets.reduce((a, b) => dist(e, a) < dist(e, b) ? a : b);
   const camp = enemyCamp("enemy");                    // the British medic tent comes first (unless someone is right on top of them)
   if (camp && dist(e, t) > 6 && (!e.post || dist(e, camp) < 55)) t = camp;
+  if (e.at) { const tk = nearestEnemyTank(e, "enemy"); if (tk) t = tk; }   // gunners hunt tanks first
   const d = dist(e, t);
   const want = Math.atan2(t.x - e.x, t.z - e.z);
   const diff = Math.atan2(Math.sin(want - e.yaw), Math.cos(want - e.yaw));   // shortest way round
@@ -3541,6 +3638,7 @@ function updateEnemy(e) {
   }
   const inTrench = e.charging && groundY(e.x + forward(e.yaw).x * .9, e.z + forward(e.yaw).z * .9) > (e.y ?? 0) + .5;
   stepHeight(e, inTrench);                              // charging Germans jump to scramble out of their trench
+  if (e.at) { atFire(e, t, d, diff, sees, "enemy"); return; }
   if (--e.cool <= 0 && d < 36 && sees && Math.abs(diff) < .3 && !smokeBlocks(e, t)) {
     // harder to hit you from far away, and harder still while you are on the move
     const moving = Math.min(1, Math.hypot(t.vx, t.vz) / PLAYER_SPEED);
@@ -3575,7 +3673,7 @@ function update() {
     const hitTank = [0, .25, .5, .75].map(k => tankAt(b.x - b.vx * k, b.z - b.vz * k, b.y, b.owner)).find(t => t);
     const sweptWall = !hitTank && [.25, .5, .75].some(k => wallStopsShot(b.x - b.vx * k, b.z - b.vz * k, b.y, b.owner));   // check along the whole step too
     if (hitTank) {                                     // a rifle bullet pings off armour
-      b.life = 0; hitTank.hp -= 1; play("clang", b.x, b.z);
+      b.life = 0; if (hitTank.side !== b.team) hitTank.hp -= b.at ? AT_TANK_DAMAGE : 1; play("clang", b.x, b.z);
       addPuff(b.x, b.y, b.z, 0xffd080, 4, 0, { alpha: 1, size: .12, glow: true });
     } else if (sweptWall || wallStopsShot(b.x, b.z, b.y, b.owner)) { b.life = 0; play("dirt", b.x, b.z); addPuff(b.x, Math.min(b.y, 2.5), b.z, 0xd6c9a0, 18, .06); }   // dust off the wall
     else if (b.y < groundY(b.x, b.z)) { b.life = 0; play("dirt", b.x, b.z, { vol: .7 }); addPuff(b.x, groundY(b.x, b.z) + .1, b.z, 0x9a8a6a, 14, .05); }  // kicks up dirt
@@ -3864,10 +3962,12 @@ function animateSoldier(s, down) {   // runs once per game step, so it looks the
 const camRay = new THREE.Raycaster(), camHead = new THREE.Vector3(), camWant = new THREE.Vector3(), camLook = new THREE.Vector3();
 function placeCamera(p) {
   if (p.flying) {
-    const pl = p.flying, f = forward(pl.yaw);
-    p.cam.position.set(pl.x - f.x * 15, pl.alt + 5.5, pl.z - f.z * 15);
-    p.cam.lookAt(pl.x + f.x * 25, pl.alt - 6, pl.z + f.z * 25);
-    p.cam.fov = 70; p.camClose = false; p.camY = groundY(p.x, p.z);
+    // first person, from the pilot's seat: looking ahead and a little down, so the rocket aim ring is in front of you
+    const pl = p.flying, f = forward(pl.yaw), aim = rocketAim(pl);
+    p.cam.position.set(pl.x + f.x * .4, pl.alt + .85, pl.z + f.z * .4);
+    p.cam.lookAt(aim.x + f.x * 4, aim.y + (pl.alt - aim.y) * .3, aim.z + f.z * 4);
+    p.cam.rotateZ(-pl.roll * .6);                       // the horizon tilts as you bank
+    p.cam.fov = 75; p.camClose = false; p.camY = groundY(p.x, p.z);
     return;
   }
   p.cam.fov = 65;
@@ -3917,9 +4017,13 @@ function render() {
     const vw = w / n;
     p.cam.aspect = vw / h; p.cam.updateProjectionMatrix();
     renderer.setViewport(i * vw, 0, vw, h); renderer.setScissor(i * vw, 0, vw, h);
-    p.group.visible = !p.camClose && !p.flying;                    // never look out from inside your own body
+    p.group.visible = !p.camClose && !p.flying;
+    for (const q of players) if (q.cockpit) q.cockpit.visible = q === p && !!q.flying;   // only the pilot sees his cockpit
+    if (p.flying) p.cockpit.spin();
+    if (p.flying) p.flying.group.visible = false;       // you are inside it: don't draw your own plane in your view                    // never look out from inside your own body
     renderer.render(scene, p.cam);
     p.group.visible = !p.flying;
+    if (p.flying) p.flying.group.visible = true;
   });
 }
 

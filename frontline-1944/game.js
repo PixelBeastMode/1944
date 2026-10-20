@@ -7,7 +7,7 @@
 //            5 game rules · 6 drawing · 7 controls
 // ============================================================
 
-const BUILD = 48;             // shown on screen, so you can tell the browser loaded the newest version
+const BUILD = 49;             // shown on screen, so you can tell the browser loaded the newest version
 document.querySelector(".tag").textContent += " · build " + BUILD;
 
 // ---------- 1) SETTINGS: change these to tweak the game ----------
@@ -49,6 +49,8 @@ const TANK_ARMOUR_BLAST = 1.8;   // how much blasts hurt tanks
 const KRADS_ALLY = 4;         // Kettenkrads parked near your start (topped up each wave)
 const KRADS_ENEMY = 0;        // German Kettenkrads that arrive each wave, two soldiers on each (0: the Germans stay in their trenches)
 const GERMAN_LINE_X = 96;     // where the German trench line runs across the field
+const TENT_HP = 500;          // how much it takes to destroy a medic tent
+const BRITISH_TENT = [-40, 14]; // where your medic tent stands
 const ATTACK_SHARE = 0.5;     // share of Germans who climb out of their trench and come for you (the rest hold it)
 const POST_GAP = 2.4;         // space between German riflemen along their trench
 const MIDLINE_X = 43;         // the white line across the middle of the field
@@ -1357,6 +1359,7 @@ function blast(x, y, z, power) {     // an explosion at (x, y, z); power 1 = a g
     if (v.num) v.hurtFlash = 1;
     if (!v.num) { v.uni.emissive.setHex(0x777777); v.flash = 6; }
   }
+  for (const m of tents) { const d = Math.max(0, Math.hypot(m.x - x, m.z - z) - 2); if (!m.dead && d < R) m.hp -= GRENADE_DAMAGE * power * 1.5 * (1 - d / R); }
   for (const k of krads) { const d = Math.hypot(k.x - x, k.z - z); if (!k.dead && d < R) k.hp -= GRENADE_DAMAGE * power * (1 - d / R); }
   for (const t of tanks) {            // tanks shrug off a distant blast, but one right beside them does real damage
     const d = Math.max(0, Math.hypot(t.x - x, t.z - z) - 1.5);
@@ -1744,20 +1747,22 @@ function tankFits(t, x, z, yaw) {    // can the tank be here without hitting a w
   for (const a of [-2.9, -1.4, 0, 1.4, 2.9]) for (const s of [-1.35, 0, 1.35]) {
     if (blockedByWall(x + f.x * a + rt.x * s, z + f.z * a + rt.z * s)) return false;
   }
+  if (tents.some(m => Math.hypot(m.x - x, m.z - z) < 6)) return false;
   return !tanks.some(o => o !== t && Math.hypot(o.x - x, o.z - z) < 5.6);
 }
 const blockedByWall = (x, z) => walls.some(w => w.top > .5 && circleHitsRect(x, z, .2, w));
 
 function tankTargets(t) {            // the enemies of this tank: soldiers and tanks of the other side
   const foes = t.side === "ally" ? [...enemies] : [...players.filter(p => p.alive), ...allies];
-  return foes.concat(tanks.filter(o => !o.dead && o.side !== t.side));
+  const camp = enemyCamp(t.side);
+  return foes.concat(tanks.filter(o => !o.dead && o.side !== t.side), camp ? [camp] : []);
 }
 function updateTank(t) {
   if (t.dead) { burnWreck(t); return; }
   if (t.flash > 0 && --t.flash === 0) t.mat.emissive.setHex(0);
   let target = null, best = 1e9;
   for (const o of tankTargets(t)) {
-    const d = dist(t, o) - (o.tank ? 30 : 0);              // enemy tanks matter most
+    const d = dist(t, o) - (o.tank ? 30 : 0) - (o.camp && dist(t, o) < 90 ? 120 : 0);   // the medic tent, then enemy tanks, matter most
     if (d < best) { best = d; target = o; }
   }
   const lead = players.find(p => p.alive) || players[0];
@@ -1834,7 +1839,7 @@ function updateShells() {
       s.x += s.vx * .7; s.z += s.vz * .7; s.trav += .7;
       s.y = s.h0 + (s.h1 - s.h0) * s.trav / s.reach;
       const hitSoldier = [...players.filter(p => p.alive), ...allies, ...enemies].some(v => Math.hypot(v.x - s.x, v.z - s.z) < .7 && s.y > (v.y || 0) && s.y < (v.y || 0) + 2);
-      if (s.x < MINX - 5 || s.x > MAXX + 5 || s.z < MINZ - 5 || s.z > MAXZ + 5 || hitSoldier || tankAt(s.x, s.z, s.y, s.owner)
+      if (s.x < MINX - 5 || s.x > MAXX + 5 || s.z < MINZ - 5 || s.z > MAXZ + 5 || hitSoldier || tankAt(s.x, s.z, s.y, s.owner) || tents.some(m => !m.dead && m.side !== s.owner.side && s.y < m.y + 3.4 && inTent(m, s.x, s.z))
         || wallStopsShot(s.x, s.z, s.y, s.owner) || s.y < groundY(s.x, s.z) + .05 || s.trav > s.reach + 40) {
         s.life = 0; blast(s.x, Math.max(s.y, groundY(s.x, s.z)), s.z, SHELL_POWER);
       }
@@ -2255,6 +2260,96 @@ document.getElementById("market").addEventListener("click", e => {
   else if (b.id === "marketClose") { closeMarket(); return; }
   renderMarket();
 });
+
+// ---------- MEDIC TENTS: walk into yours and the medic patches you up at once. Destroy theirs; they want to destroy yours ----------
+let tents = [];
+function tentGeometry(side) {        // a canvas aid tent with red crosses, open at the front (+z)
+  const canvas = side === "ally" ? 0xd9d3bf : 0xc8c5b5, red = 0xb81d1d, white = 0xf2efe6, P = [];
+  const W = 2.5, D = 2.1, wallH = 2.1, ridge = 3.6, slope = Math.atan2(ridge - wallH, W), roofLen = Math.hypot(W, ridge - wallH) + .15;
+  for (const s of [-1, 1]) {
+    P.push({ geo: new THREE.BoxGeometry(.05, wallH, D * 2), at: [s * W, wallH / 2, 0], color: canvas });              // side walls
+    P.push({ geo: new THREE.BoxGeometry(roofLen, .05, D * 2 + .3), at: [s * W / 2, (wallH + ridge) / 2, 0], rot: [0, 0, -s * slope], color: canvas });   // roof
+    // a red cross on a white square on each side of the roof, and on each wall
+    const nx = -s * Math.sin(slope) * -1, ny = Math.cos(slope), rx = s * W / 2 + s * Math.sin(slope) * .04, ry = (wallH + ridge) / 2 + ny * .04;
+    P.push({ geo: new THREE.BoxGeometry(1.6, .012, 1.6), at: [rx, ry, 0], rot: [0, 0, -s * slope], color: white });
+    P.push({ geo: new THREE.BoxGeometry(1.2, .02, .36), at: [rx + s * Math.sin(slope) * .01, ry + .01, 0], rot: [0, 0, -s * slope], color: red });
+    P.push({ geo: new THREE.BoxGeometry(.36, .02, 1.2), at: [rx + s * Math.sin(slope) * .01, ry + .01, 0], rot: [0, 0, -s * slope], color: red });
+    P.push({ geo: new THREE.BoxGeometry(.01, 1.3, 1.3), at: [s * (W + .035), 1.15, 0], color: white });
+    P.push({ geo: new THREE.BoxGeometry(.012, .95, .3), at: [s * (W + .045), 1.15, 0], color: red });
+    P.push({ geo: new THREE.BoxGeometry(.012, .3, .95), at: [s * (W + .045), 1.15, 0], color: red });
+    P.push({ geo: new THREE.BoxGeometry(.9, wallH, .04), at: [s * (W - .45), wallH / 2, D + .02], rot: [0, s * .9, 0], color: canvas });   // front flaps tied back
+  }
+  P.push({ geo: new THREE.BoxGeometry(W * 2, wallH, .05), at: [0, wallH / 2, -D], color: canvas });                       // back wall
+  const gable = new THREE.Shape([new THREE.Vector2(-W, wallH), new THREE.Vector2(W, wallH), new THREE.Vector2(0, ridge)]);
+  for (const z of [-D, D]) P.push({ geo: new THREE.ExtrudeGeometry(gable, { depth: .05, bevelEnabled: false }), at: [0, 0, z - .025], color: canvas });   // gables
+  for (const z of [-D, D]) P.push({ geo: new THREE.CylinderGeometry(.05, .05, ridge, 8), at: [0, ridge / 2, z], color: 0x5a4632 });   // poles
+  P.push({ geo: new THREE.BoxGeometry(W * 2 - .1, .02, D * 2 - .1), at: [0, .012, 0], color: 0x6a6450 });            // ground sheet
+  P.push({ geo: new THREE.BoxGeometry(.8, .38, 1.9), at: [1.4, .2, -.5], color: 0x5a6236 });                        // stretcher cot
+  P.push({ geo: new THREE.BoxGeometry(.75, .08, 1.3), at: [1.4, .43, -.3], color: 0x7a7258 });                       // blanket
+  P.push({ geo: new THREE.BoxGeometry(.55, .5, .45), at: [-1.8, .25, -1.5], color: 0x6b5338 });                      // supply crate
+  P.push({ geo: new THREE.BoxGeometry(.3, .02, .3), at: [-1.8, .51, -1.5], color: white });
+  P.push({ geo: new THREE.BoxGeometry(.2, .03, .06), at: [-1.8, .53, -1.5], color: red });
+  P.push({ geo: new THREE.BoxGeometry(.06, .03, .2), at: [-1.8, .53, -1.5], color: red });
+  return mergeParts(P, .05, true);
+}
+function buildTent(side, x, z, yaw) {
+  const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: .95, side: THREE.DoubleSide });
+  const group = new THREE.Group(), mesh = new THREE.Mesh(tentGeometry(side), mat);
+  mesh.castShadow = mesh.receiveShadow = true; group.add(mesh);
+  const y = groundY(x, z);
+  group.position.set(x, y, z); group.rotation.y = yaw;
+  scene.add(group);
+  // the medic, standing inside with a dressing ready
+  const medic = buildSoldier(side === "ally" ? "british" : "german");
+  scene.remove(medic.group); group.add(medic.group);
+  medic.group.position.set(-.7, 0, -.9); medic.group.rotation.set(0, .3, 0);
+  medic.rifle.visible = false;
+  if (medic.held) medic.held.bandage.visible = true;
+  const band = new THREE.Mesh(new THREE.CylinderGeometry(.09, .09, .07, 12), new THREE.MeshLambertMaterial({ color: 0xf2efe6 }));   // red-cross armband
+  band.position.set(.3, 1.38, 0); medic.torso.add(band);
+  const tent = { camp: true, side, x, z, y, yaw, half: [2.6, 2.2], hp: TENT_HP, maxHp: TENT_HP, dead: false, vx: 0, vz: 0, group, mesh, mat, medic, burn: 0 };
+  tent.bar = makeHealthBar(group); tent.bar.back.scale.set(2.4, .2, 1); tent.bar.back.position.y = tent.bar.fill.position.y = 4.4;
+  return tent;
+}
+const inTent = (m, x, z) => insideTank(m, x, z, -.2);
+function restoreTents() {            // both aid stations are (re)built at the start of every battle and every wave
+  if (!tents.length) {
+    tents.push(buildTent("ally", BRITISH_TENT[0], BRITISH_TENT[1], Math.PI / 2));
+    tents.push(buildTent("enemy", GERMAN_LINE_X + 25, -16, -Math.PI / 2));
+  }
+  for (const m of tents) {
+    m.hp = m.maxHp; m.dead = false; m.burn = 0;
+    m.mesh.scale.y = 1; m.mesh.position.y = 0; m.mat.color.setHex(0xffffff);
+    m.medic.group.rotation.set(0, .3, 0); m.medic.group.position.y = 0;
+    m.bar.back.visible = m.bar.fill.visible = true;
+  }
+}
+function destroyTent(m) {
+  m.dead = true;
+  m.mesh.scale.y = .28; m.mat.color.setHex(0x4a4640);           // the canvas collapses and scorches
+  m.medic.group.rotation.x = -Math.PI / 2; m.medic.group.position.y = .2;
+  m.bar.back.visible = m.bar.fill.visible = false;
+  blast(m.x, m.y + .8, m.z, .5);
+  if (m.side === "enemy") { score += 1000; radio(pick(["Their aid station is burning! Outstanding work!", "Enemy medic tent destroyed! That'll hurt them!"])); }
+  else radio(pick(["Our aid station has been hit! No more patching up until reinforcements arrive!", "They've destroyed the medic tent! Keep your heads down!"]));
+}
+function updateTents() {
+  for (const m of tents) {
+    if (m.dead) { if (++m.burn < 1200 && Math.random() < .3) addPuff(m.x + rand(-1.5, 1.5), m.y + 1, m.z + rand(-1.5, 1.5), pick([0x2a2724, 0x3a3631]), rand(120, 200), .012, { vy: rand(.03, .05), alpha: .5, size: rand(.6, 1) }); continue; }
+    if (m.hp <= 0) { destroyTent(m); continue; }
+    const f = Math.max(.001, m.hp / m.maxHp);
+    m.bar.fill.scale.set(2.3 * f, .12, 1); m.bar.fill.center.x = .5 / f; m.bar.fill.material.color.set(hpColor(f));
+    // anyone of this side inside the tent is healed at once
+    const friends = m.side === "ally" ? [...players.filter(p => p.alive), ...allies] : enemies;
+    for (const s of friends) {
+      if (!inTent(m, s.x, s.z)) { s.inMedic = false; continue; }
+      const full = s.maxHp || MAX_HP;
+      if (s.hp < full) { s.hp = full; if (s.num) { play("bandage", s.x, s.z); s.hurtFlash = 0; } }
+      s.inMedic = true;
+    }
+  }
+}
+const enemyCamp = side => tents.find(m => m.side !== side && !m.dead);   // the other side's tent, if still standing
 
 // ---------- 4) THE SOLDIERS ----------
 // Three armies of 1944, each with its own uniform, helmet, kit and rifle.
@@ -2754,6 +2849,7 @@ function startGame(n) {
   players = [makePlayer(1)];
   if (twoPlayer) players.push(makePlayer(2));
   wave = 0; score = 0; paused = false; funds = 0;
+  restoreTents();
   if (marketOpen) closeMarket();
   for (const p of players) equipGun(p, p.num === 2 ? "garand" : "enfield");
   for (let i = 0; i < ALLIES; i++) allies.push(makeAlly());
@@ -2775,6 +2871,7 @@ function nextWave() {
   setTimeout(() => play("whistle"), 300);
   spawnQueue = 3 + wave * 2 + EXTRA_ENEMIES;
   for (const p of trenchPosts) p.holder = null;
+  if (wave > 1) restoreTents();
   overTheTop = false;
   if (players.length) while (spawnQueue > 0 && spawnDefender()) spawnQueue--;     // the trench line is manned when the wave begins
   radioTimer = 60 * 50;
@@ -2991,6 +3088,8 @@ function updateAlly(a) {
   const lead = players.find(p => p.alive) || players[0];
   let t = null, d = 1e9;
   for (const e of enemies) { const de = dist(a, e); if (de < d) { d = de; t = e; } }
+  const camp = enemyCamp("ally");
+  if (camp && dist(a, camp) < d) { d = dist(a, camp); t = camp; }
   const homeX = lead.x + a.post.dx * .7, homeZ = lead.z + a.post.dz * .7, fromHome = Math.hypot(a.x - homeX, a.z - homeZ);
   const goHome = !t || (fromHome > 30 && d > 20);    // no enemy about, or wandered too far: fall back towards you
   const tx = goHome ? homeX : t.x, tz = goHome ? homeZ : t.z;
@@ -3091,7 +3190,9 @@ function updateEnemy(e) {
   if (e.flash > 0 && --e.flash === 0) e.uni.emissive.setHex(0);
   const targets = [...players.filter(p => p.alive), ...allies];
   if (!targets.length) return;
-  const t = targets.reduce((a, b) => dist(e, a) < dist(e, b) ? a : b);
+  let t = targets.reduce((a, b) => dist(e, a) < dist(e, b) ? a : b);
+  const camp = enemyCamp("enemy");                    // the British medic tent comes first (unless someone is right on top of them)
+  if (camp && dist(e, t) > 6 && (!e.post || dist(e, camp) < 55)) t = camp;
   const d = dist(e, t);
   const want = Math.atan2(t.x - e.x, t.z - e.z);
   const diff = Math.atan2(Math.sin(want - e.yaw), Math.cos(want - e.yaw));   // shortest way round
@@ -3122,6 +3223,7 @@ function update() {
   enemies.forEach(updateEnemy);
   allies.forEach(updateAlly);
   updateTanks();
+  updateTents();
   const lead = players.find(p => p.alive);           // the commander nags if you hang back from the German line
   if (lead && --radioTimer <= 0) { radioTimer = 60 * rand(45, 70); if (lead.x < GERMAN_LINE_X - 25) radio(pick(RADIO.push)); }
   updateKrads();
@@ -3144,6 +3246,10 @@ function update() {
       addPuff(b.x, b.y, b.z, 0xffd080, 4, 0, { alpha: 1, size: .12, glow: true });
     } else if (sweptWall || wallStopsShot(b.x, b.z, b.y, b.owner)) { b.life = 0; play("dirt", b.x, b.z); addPuff(b.x, Math.min(b.y, 2.5), b.z, 0xd6c9a0, 18, .06); }   // dust off the wall
     else if (b.y < groundY(b.x, b.z)) { b.life = 0; play("dirt", b.x, b.z, { vol: .7 }); addPuff(b.x, groundY(b.x, b.z) + .1, b.z, 0x9a8a6a, 14, .05); }  // kicks up dirt
+    for (const m of tents) if (b.life > 0 && !m.dead && m.side !== b.team && b.y < m.y + 3.4 && inTent(m, b.x, b.z)) {
+      b.life = 0; m.hp -= b.dmg ?? (b.team === "ally" ? 20 : 12);
+      addPuff(b.x, b.y, b.z, 0xd9d3bf, 8, .04, { alpha: .6, size: .3 });
+    }
     const victims = b.team === "ally" ? enemies : [...players.filter(p => p.alive), ...allies];
     if (b.team === "enemy" && b.life > 0 && !b.whizzed) for (const p of players)   // a near miss whizzes past your ear
       if (p.alive && dist(b, p) < 1.8 && dist(b, p) > .6) { b.whizzed = true; play("whiz", b.x, b.z); }
@@ -3487,14 +3593,14 @@ function updateHUD() {
     document.getElementById("hptext" + p.num).textContent = `${Math.ceil(p.hp)} / ${MAX_HP}`;
     updateHotbar(p);
     const pr = document.getElementById("prompt" + p.num), key = p.num === 1 ? "F" : ";";
-    pr.textContent = p.riding ? key + " – get off the Kettenkrad · W/S speed, A/D steer" : p.alive && freeKradNear(p) ? key + " – ride the Kettenkrad" : "";
+    pr.textContent = p.inMedic ? "MEDIC TENT – the medic has patched you up" : p.riding ? key + " – get off the Kettenkrad · W/S speed, A/D steer" : p.alive && freeKradNear(p) ? key + " – ride the Kettenkrad" : "";
     pr.hidden = !pr.textContent;
     p.hurtFlash = (p.hurtFlash || 0) * .93;               // red flash when hit, and a faint glow while health is low
     const low = p.alive ? clamp01((.35 - p.hp / MAX_HP) / .35) * .45 : .6;
     document.getElementById("hurt" + p.num).style.opacity = Math.max(p.hurtFlash * .75, low);
     document.getElementById("ammo" + p.num).textContent = p.reload ? "RELOADING..." : (GUNS[p.gun].mag <= 10 ? "AMMO " + "▮".repeat(p.ammo) + "▯".repeat(GUNS[p.gun].mag - p.ammo) : `AMMO ${p.ammo} / ${GUNS[p.gun].mag}`);
   });
-  document.getElementById("topline").textContent = `WAVE ${wave} · SCORE ${score} · FUNDS ${funds} · ALLIES ${allies.length} · ENEMIES ${enemies.length + spawnQueue + krads.reduce((n, k) => n + k.riders.length, 0)} · TANKS ${tanks.filter(t => !t.dead && t.side === "ally").length} v ${tanks.filter(t => !t.dead && t.side === "enemy").length}`;
+  document.getElementById("topline").textContent = `WAVE ${wave} · SCORE ${score} · FUNDS ${funds} · ALLIES ${allies.length} · ENEMIES ${enemies.length + spawnQueue + krads.reduce((n, k) => n + k.riders.length, 0)} · TANKS ${tanks.filter(t => !t.dead && t.side === "ally").length} v ${tanks.filter(t => !t.dead && t.side === "enemy").length} · MEDIC TENTS ${tents[0] && !tents[0].dead ? "✚" : "✖"} v ${tents[1] && !tents[1].dead ? "✚" : "✖"}`;
   const banner = document.getElementById("banner");
   banner.textContent = paused ? "PAUSED" : "WAVE " + wave + (wave > 1 ? ` · +${FUNDS_PER_WAVE} FUNDS` : "");
   banner.style.opacity = !marketOpen && (paused || waveTimer > 0) ? 1 : 0;

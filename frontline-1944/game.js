@@ -7,7 +7,7 @@
 //            5 game rules · 6 drawing · 7 controls
 // ============================================================
 
-const BUILD = 47;             // shown on screen, so you can tell the browser loaded the newest version
+const BUILD = 48;             // shown on screen, so you can tell the browser loaded the newest version
 document.querySelector(".tag").textContent += " · build " + BUILD;
 
 // ---------- 1) SETTINGS: change these to tweak the game ----------
@@ -49,6 +49,7 @@ const TANK_ARMOUR_BLAST = 1.8;   // how much blasts hurt tanks
 const KRADS_ALLY = 4;         // Kettenkrads parked near your start (topped up each wave)
 const KRADS_ENEMY = 0;        // German Kettenkrads that arrive each wave, two soldiers on each (0: the Germans stay in their trenches)
 const GERMAN_LINE_X = 96;     // where the German trench line runs across the field
+const ATTACK_SHARE = 0.5;     // share of Germans who climb out of their trench and come for you (the rest hold it)
 const POST_GAP = 2.4;         // space between German riflemen along their trench
 const MIDLINE_X = 43;         // the white line across the middle of the field
 const BRITISH_FLAG = [-31, 0]; // where your flag flies (behind your trench)
@@ -2774,6 +2775,7 @@ function nextWave() {
   setTimeout(() => play("whistle"), 300);
   spawnQueue = 3 + wave * 2 + EXTRA_ENEMIES;
   for (const p of trenchPosts) p.holder = null;
+  overTheTop = false;
   if (players.length) while (spawnQueue > 0 && spawnDefender()) spawnQueue--;     // the trench line is manned when the wave begins
   radioTimer = 60 * 50;
   setTimeout(() => radio(wave > 1 ? pick(RADIO.won) + " " + pick(RADIO.start) : pick(RADIO.start)), 1500);
@@ -3021,12 +3023,18 @@ function spawnDefender() {
   const post = pick(free), e = makeEnemy();
   e.x = post.x; e.z = post.z; e.y = groundY(post.x, post.z); e.yaw = -Math.PI / 2; e.post = post; post.holder = e;
   e.crouched = true; e.duck = rand(30, 150); e.cool = rand(60, 160);
+  if (Math.random() < ATTACK_SHARE) e.charge = rand(90, 60 * 30);   // this one will go over the top after a while
   e.group.position.set(e.x, e.y, e.z);
   enemies.push(e);
   return true;
 }
 // a German holding his post: ducks down behind the sandbags, pops up to fire, and never leaves the trench
 function holdPost(e, t, d, diff, sees) {
+  if (e.charge && --e.charge <= 0) {                   // over the top: leave the post and attack
+    e.post.holder = null; e.post = null; e.crouched = false; e.charging = true;
+    if (!overTheTop) { overTheTop = true; radio(pick(RADIO.charge)); }
+    return;
+  }
   const dx = e.post.x - e.x, dz = e.post.z - e.z, dp = Math.hypot(dx, dz);
   if (dp > .4) steer(e, dx / dp * ENEMY_SPEED, dz / dp * ENEMY_SPEED, AGILITY * .6); else steer(e, 0, 0, AGILITY * .6);
   if (--e.duck <= 0) { e.crouched = !e.crouched; e.duck = e.crouched ? rand(50, 140) : rand(70, 150); }
@@ -3051,9 +3059,10 @@ const RADIO = {
     "Keep pushing! Use the smoke and get into those trenches!",
     "Get your heads down and get across that field! Now!",
   ],
+  charge: ["Heads up! Jerry is coming over the top! Hold them off!", "Enemy infantry advancing across the field! Fire at will!", "Here they come! Stand your ground!"],
   won: ["Trench line taken! Good work.", "That's the way! The trench is ours.", "Well done, they're on the run!"],
 };
-let radioTimer = 0, radioVoice = null;
+let radioTimer = 0, radioVoice = null, overTheTop = false;
 function pickRadioVoice() {          // a man's English voice if the browser has one
   const vs = window.speechSynthesis ? speechSynthesis.getVoices() : [];
   return vs.find(v => /UK English Male|George|Ryan|Daniel|Thomas|Arthur/i.test(v.name) && /^en/i.test(v.lang))
@@ -3097,7 +3106,8 @@ function updateEnemy(e) {
     if (Math.random() < .012) e.strafe *= -1;
     if (Math.random() < .006) e.pause = rand(20, 50);
   }
-  stepHeight(e, false);
+  const inTrench = e.charging && groundY(e.x + forward(e.yaw).x * .9, e.z + forward(e.yaw).z * .9) > (e.y ?? 0) + .5;
+  stepHeight(e, inTrench);                              // charging Germans jump to scramble out of their trench
   if (--e.cool <= 0 && d < 36 && sees && Math.abs(diff) < .3 && !smokeBlocks(e, t)) {
     // harder to hit you from far away, and harder still while you are on the move
     const moving = Math.min(1, Math.hypot(t.vx, t.vz) / PLAYER_SPEED);
